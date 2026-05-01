@@ -138,6 +138,10 @@ components:
         confirmed:
           type: boolean
           default: false
+        confirmation_token:
+          type: string
+          nullable: true
+          description: One-time token returned by preview/blocked execute for confirm_required actions.
     ActionResponse:
       type: object
       required: [ok, action_id, executed, confirmation_required, message, speak]
@@ -157,6 +161,10 @@ components:
         request_id:
           type: string
           nullable: true
+        confirmation_token:
+          type: string
+          nullable: true
+          description: One-time confirmation token for confirm_required actions.
         preview:
           type: object
           nullable: true
@@ -164,3 +172,4 @@ components:
         error:
           type: string
           nullable: true
+          description: Generic error code. Internal Home Assistant details are not returned.

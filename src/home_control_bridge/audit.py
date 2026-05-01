@@ -27,6 +27,11 @@ def _sanitize(value: Any) -> Any:
             lowered = key.lower()
             if "token" in lowered or "authorization" in lowered or "password" in lowered or "secret" in lowered:
                 continue
+            if lowered == "user_text":
+                sanitized["user_text_present"] = item is not None
+                if isinstance(item, str):
+                    sanitized["user_text_length"] = len(item)
+                continue
             sanitized[key] = _sanitize(item)
         return sanitized
     if isinstance(value, list):

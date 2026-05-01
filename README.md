@@ -30,9 +30,11 @@ Copy-Item .env.example .env
 
 ```powershell
 $env:HOME_CONTROL_CONFIG = "config/home-control.yaml"
-$env:HOME_CONTROL_API_TOKEN = "change-me-local-bridge-token"
+$env:HOME_CONTROL_API_TOKEN = (python -c "import secrets; print(secrets.token_urlsafe(32))")
 $env:HOME_ASSISTANT_TOKEN = "Home Assistant の Long-lived access token"
 ```
+
+`HOME_CONTROL_API_TOKEN` は32文字以上のランダム値にしてください。`.env.example` のプレースホルダーや短い値のままだと起動時/認証時に拒否されます。
 
 `config/home-control.yaml` の `home_assistant.base_url` と `actions` を自宅環境に合わせて編集してください。危険な操作、玄関、鍵、セキュリティ、暖房器具などは初期allowlistに入れないでください。
 
@@ -53,6 +55,7 @@ home_assistant:
 server:
   api_token_env: "HOME_CONTROL_API_TOKEN"
   log_path: ".cache/home_control/events.jsonl"
+  min_api_token_length: 32
 udp_events:
   enabled: false
   host: "127.0.0.1"
@@ -100,7 +103,7 @@ udp_events:
 }
 ```
 
-成功時は `phase: "done"`、失敗時は `phase: "error"` を送ります。`done` には `message`、`error` には `message` と `error` が追加されます。
+成功時は `phase: "done"`、失敗時は `phase: "error"` を送ります。`done` には `message`、`error` には `message` と汎用エラーコードが追加されます。Home Assistant 側の詳細エラー本文はUDPやHTTPレスポンスには出しません。
 
 ## curl例
 
@@ -136,13 +139,13 @@ curl.exe -X POST http://127.0.0.1:8787/actions/curtain_close/execute `
   -d '{ "source": "dify", "request_id": "demo-3", "user_text": "カーテンを閉めて" }'
 ```
 
-実行する場合は `confirmed: true` を送ります。
+レスポンスの `confirmation_token` を確認後の実行リクエストに含めます。確認トークンは短時間で失効し、1回だけ使えます。
 
 ```powershell
 curl.exe -X POST http://127.0.0.1:8787/actions/curtain_close/execute `
   -H "Authorization: Bearer $env:HOME_CONTROL_API_TOKEN" `
   -H "Content-Type: application/json" `
-  -d '{ "source": "dify", "request_id": "demo-4", "confirmed": true }'
+  -d '{ "source": "dify", "request_id": "demo-4", "confirmed": true, "confirmation_token": "<confirmation_token>" }'
 ```
 
 dry-runはHome Assistantを呼びません。
@@ -153,6 +156,8 @@ curl.exe -X POST http://127.0.0.1:8787/actions/light_on/execute `
   -H "Content-Type: application/json" `
   -d '{ "source": "dify", "request_id": "demo-5", "dry_run": true }'
 ```
+
+`request_id` が同じ実行リクエストは短時間重複として扱い、Home Assistant への二重送信を避けます。Dify の `workflow_run_id` など、実行ごとに一意な値を入れてください。
 
 ## Dify HTTP Request node例
 
@@ -194,7 +199,8 @@ curl.exe -X POST http://127.0.0.1:8787/actions/light_on/execute `
   "source": "dify",
   "request_id": "{{workflow_run_id}}",
   "user_text": "{{query}}",
-  "confirmed": false
+  "confirmed": false,
+  "confirmation_token": "{{confirmation_token}}"
 }
 ```
 
@@ -206,7 +212,7 @@ Dify用OpenAPI schemaは [docs/dify-openapi.yaml](docs/dify-openapi.yaml) にあ
 
 ## 操作ログ
 
-既定では `.cache/home_control/events.jsonl` にJSONLで保存します。API token、Authorization、password、secretを含むキーは保存しません。
+既定では `.cache/home_control/events.jsonl` にJSONLで保存します。API token、Authorization、password、secretを含むキーは保存しません。ユーザー発話本文は保存せず、本文の有無と文字数だけを残します。
 
 ## テスト
 

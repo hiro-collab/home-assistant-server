@@ -8,7 +8,10 @@ from .config import HomeAssistantConfig
 
 
 class HomeAssistantError(RuntimeError):
-    pass
+    def __init__(self, safe_message: str, *, log_detail: str | None = None) -> None:
+        super().__init__(safe_message)
+        self.safe_message = safe_message
+        self.log_detail = log_detail or safe_message
 
 
 class HomeAssistantClient:
@@ -44,11 +47,16 @@ class HomeAssistantClient:
             async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
                 response = await client.post(url, headers=self._headers(), json=payload)
         except httpx.HTTPError as exc:
-            raise HomeAssistantError(f"Home Assistant request failed: {exc.__class__.__name__}") from exc
+            raise HomeAssistantError(
+                "Home Assistant request failed.",
+                log_detail=f"Home Assistant request failed: {exc.__class__.__name__}",
+            ) from exc
 
         if not response.is_success:
-            detail = response.text[:500]
-            raise HomeAssistantError(f"Home Assistant returned HTTP {response.status_code}: {detail}")
+            raise HomeAssistantError(
+                "Home Assistant returned an error.",
+                log_detail=f"Home Assistant returned HTTP {response.status_code}.",
+            )
 
         try:
             body: Any = response.json()

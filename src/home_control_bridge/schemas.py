@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ActionSummary(BaseModel):
@@ -13,11 +13,14 @@ class ActionSummary(BaseModel):
 
 
 class ActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     source: str = Field(default="unknown", max_length=80)
     request_id: str | None = Field(default=None, max_length=160)
     user_text: str | None = Field(default=None, max_length=1000)
     dry_run: bool = False
     confirmed: bool = False
+    confirmation_token: str | None = Field(default=None, max_length=128)
 
 
 class ActionResponse(BaseModel):
@@ -28,6 +31,7 @@ class ActionResponse(BaseModel):
     message: str
     speak: str
     request_id: str | None = None
+    confirmation_token: str | None = None
     preview: dict[str, Any] | None = None
     error: str | None = None
 

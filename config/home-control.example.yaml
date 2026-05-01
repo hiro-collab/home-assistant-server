@@ -6,6 +6,7 @@ home_assistant:
 server:
   api_token_env: "HOME_CONTROL_API_TOKEN"
   log_path: ".cache/home_control/events.jsonl"
+  min_api_token_length: 32
 
 udp_events:
   enabled: false
