@@ -7,15 +7,17 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from .audit import JsonlAuditLogger
-from .config import BridgeConfig, ConfigError, action_preview_payload, get_required_env, load_config
+from .config import ActionConfig, BridgeConfig, ConfigError, action_preview_payload, get_required_env, load_config
 from .home_assistant import HomeAssistantClient, HomeAssistantError
 from .schemas import ActionRequest, ActionResponse, ActionSummary, HealthResponse
+from .udp_events import UdpEventPhase, UdpEventSender
 
 
 def create_app(
     config: BridgeConfig | None = None,
     ha_client: HomeAssistantClient | None = None,
     audit_logger: JsonlAuditLogger | None = None,
+    udp_event_sender: UdpEventSender | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="Home Control Safety Bridge",
@@ -34,6 +36,9 @@ def create_app(
     app.state.config_error = config_error
     app.state.audit_logger = audit_logger if audit_logger is not None and config else (
         JsonlAuditLogger(config.server.log_path) if config else None
+    )
+    app.state.udp_event_sender = udp_event_sender if udp_event_sender is not None and config else (
+        UdpEventSender(config.udp_events) if config else None
     )
     app.state.ha_client = ha_client
 
@@ -209,6 +214,8 @@ def create_app(
                 preview=preview,
             )
 
+        _emit_action_event(app, "start", action_id, action, body)
+
         try:
             ha_result = await app.state.ha_client.turn_on_script(action.ha_script)
         except HomeAssistantError as exc:
@@ -226,6 +233,15 @@ def create_app(
                     "ha_script": action.ha_script,
                     "error": str(exc),
                 },
+            )
+            _emit_action_event(
+                app,
+                "error",
+                action_id,
+                action,
+                body,
+                message="Home Assistantへの実行要求に失敗しました。",
+                error=str(exc),
             )
             return ActionResponse(
                 ok=False,
@@ -254,6 +270,7 @@ def create_app(
                 "ha_status_code": ha_result.get("status_code"),
             },
         )
+        _emit_action_event(app, "done", action_id, action, body, message=action.response_text)
         return ActionResponse(
             ok=True,
             action_id=action_id,
@@ -290,3 +307,41 @@ def _audit(app: FastAPI, event: dict) -> None:
     logger = app.state.audit_logger
     if logger is not None:
         logger.write(event)
+
+
+def _emit_action_event(
+    app: FastAPI,
+    phase: UdpEventPhase,
+    action_id: str,
+    action: ActionConfig,
+    body: ActionRequest,
+    *,
+    message: str | None = None,
+    error: str | None = None,
+) -> None:
+    sender = app.state.udp_event_sender
+    if sender is None:
+        return
+
+    try:
+        sender.emit(
+            phase=phase,
+            action_id=action_id,
+            label=action.label,
+            source=body.source,
+            request_id=body.request_id,
+            message=message,
+            error=error,
+        )
+    except Exception as exc:
+        _audit(
+            app,
+            {
+                "event": "udp_event_failed",
+                "phase": phase,
+                "action_id": action_id,
+                "source": body.source,
+                "request_id": body.request_id,
+                "error": str(exc),
+            },
+        )

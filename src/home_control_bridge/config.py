@@ -36,6 +36,21 @@ class ServerConfig(BaseModel):
     log_path: str = ".cache/home_control/events.jsonl"
 
 
+class UdpEventsConfig(BaseModel):
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = Field(default=7000, ge=1, le=65535)
+    event_type: str = "home_control_magic"
+
+    @field_validator("host", "event_type")
+    @classmethod
+    def validate_non_empty_string(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be empty")
+        return value
+
+
 class ActionConfig(BaseModel):
     label: str
     ha_script: str
@@ -54,6 +69,7 @@ class ActionConfig(BaseModel):
 class BridgeConfig(BaseModel):
     home_assistant: HomeAssistantConfig
     server: ServerConfig = Field(default_factory=ServerConfig)
+    udp_events: UdpEventsConfig = Field(default_factory=UdpEventsConfig)
     actions: dict[str, ActionConfig]
 
     @field_validator("actions")

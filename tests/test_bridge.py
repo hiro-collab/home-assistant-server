@@ -11,6 +11,18 @@ from home_control_bridge.audit import JsonlAuditLogger
 from home_control_bridge.config import BridgeConfig
 
 
+class FakeUdpEventSender:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.events: list[dict] = []
+        self.fail = fail
+
+    def emit(self, **event):
+        if self.fail:
+            raise OSError("udp unavailable")
+        self.events.append(event)
+        return event
+
+
 class FakeHomeAssistant:
     def __init__(self, *, fail: bool = False) -> None:
         self.calls: list[str] = []
@@ -64,12 +76,12 @@ def token(monkeypatch):
     return "test-token"
 
 
-def make_client(config, token, tmp_path, ha=None):
+def make_client(config, token, tmp_path, ha=None, udp=None):
     del token
     ha = ha or FakeHomeAssistant()
     logger = JsonlAuditLogger(str(tmp_path / "events.jsonl"))
-    app = create_app(config=config, ha_client=ha, audit_logger=logger)
-    return TestClient(app), ha, tmp_path / "events.jsonl"
+    app = create_app(config=config, ha_client=ha, audit_logger=logger, udp_event_sender=udp)
+    return TestClient(app), ha, tmp_path / "events.jsonl", udp
 
 
 def auth_headers(token: str) -> dict[str, str]:
@@ -77,7 +89,7 @@ def auth_headers(token: str) -> dict[str, str]:
 
 
 def test_health_is_available_without_bridge_token(config, token, tmp_path):
-    client, _, _ = make_client(config, token, tmp_path)
+    client, _, _, _ = make_client(config, token, tmp_path)
 
     response = client.get("/health")
 
@@ -87,7 +99,7 @@ def test_health_is_available_without_bridge_token(config, token, tmp_path):
 
 
 def test_actions_require_api_token(config, token, tmp_path):
-    client, _, _ = make_client(config, token, tmp_path)
+    client, _, _, _ = make_client(config, token, tmp_path)
 
     response = client.get("/actions")
 
@@ -95,7 +107,7 @@ def test_actions_require_api_token(config, token, tmp_path):
 
 
 def test_actions_returns_public_allowlist(config, token, tmp_path):
-    client, _, _ = make_client(config, token, tmp_path)
+    client, _, _, _ = make_client(config, token, tmp_path)
 
     response = client.get("/actions", headers=auth_headers(token))
 
@@ -106,7 +118,7 @@ def test_actions_returns_public_allowlist(config, token, tmp_path):
 
 
 def test_preview_logs_without_executing(config, token, tmp_path):
-    client, ha, log_path = make_client(config, token, tmp_path)
+    client, ha, log_path, _ = make_client(config, token, tmp_path)
 
     response = client.post(
         "/actions/light_on/preview",
@@ -129,7 +141,7 @@ def test_preview_logs_without_executing(config, token, tmp_path):
 
 
 def test_post_body_is_optional(config, token, tmp_path):
-    client, ha, _ = make_client(config, token, tmp_path)
+    client, ha, _, _ = make_client(config, token, tmp_path)
 
     response = client.post("/actions/light_on/execute", headers=auth_headers(token))
 
@@ -139,7 +151,7 @@ def test_post_body_is_optional(config, token, tmp_path):
 
 
 def test_execute_calls_only_configured_script(config, token, tmp_path):
-    client, ha, _ = make_client(config, token, tmp_path)
+    client, ha, _, _ = make_client(config, token, tmp_path)
 
     response = client.post(
         "/actions/light_on/execute",
@@ -160,7 +172,7 @@ def test_execute_calls_only_configured_script(config, token, tmp_path):
 
 
 def test_unknown_action_is_not_executed(config, token, tmp_path):
-    client, ha, _ = make_client(config, token, tmp_path)
+    client, ha, _, _ = make_client(config, token, tmp_path)
 
     response = client.post(
         "/actions/lock_unlock/execute",
@@ -173,7 +185,7 @@ def test_unknown_action_is_not_executed(config, token, tmp_path):
 
 
 def test_dry_run_does_not_call_home_assistant(config, token, tmp_path):
-    client, ha, _ = make_client(config, token, tmp_path)
+    client, ha, _, _ = make_client(config, token, tmp_path)
 
     response = client.post(
         "/actions/light_on/execute",
@@ -188,7 +200,7 @@ def test_dry_run_does_not_call_home_assistant(config, token, tmp_path):
 
 
 def test_confirmation_required_action_is_blocked_until_confirmed(config, token, tmp_path):
-    client, ha, _ = make_client(config, token, tmp_path)
+    client, ha, _, _ = make_client(config, token, tmp_path)
 
     first = client.post(
         "/actions/curtain_close/execute",
@@ -210,7 +222,7 @@ def test_confirmation_required_action_is_blocked_until_confirmed(config, token, 
 
 
 def test_home_assistant_failure_returns_safe_response(config, token, tmp_path):
-    client, _, _ = make_client(config, token, tmp_path, ha=FakeHomeAssistant(fail=True))
+    client, _, _, _ = make_client(config, token, tmp_path, ha=FakeHomeAssistant(fail=True))
 
     response = client.post(
         "/actions/light_on/execute",
@@ -222,6 +234,91 @@ def test_home_assistant_failure_returns_safe_response(config, token, tmp_path):
     assert response.json()["ok"] is False
     assert response.json()["executed"] is False
     assert response.json()["speak"] == "家電操作に失敗しました。"
+
+
+def test_execute_emits_udp_start_and_done(config, token, tmp_path):
+    udp = FakeUdpEventSender()
+    client, _, _, _ = make_client(config, token, tmp_path, udp=udp)
+
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-udp-1", "user_text": "照明をつけて"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["executed"] is True
+    assert udp.events == [
+        {
+            "phase": "start",
+            "action_id": "light_on",
+            "label": "照明をつける",
+            "source": "dify",
+            "request_id": "req-udp-1",
+            "message": None,
+            "error": None,
+        },
+        {
+            "phase": "done",
+            "action_id": "light_on",
+            "label": "照明をつける",
+            "source": "dify",
+            "request_id": "req-udp-1",
+            "message": "照明をつけました。",
+            "error": None,
+        },
+    ]
+
+
+def test_execute_emits_udp_error_on_home_assistant_failure(config, token, tmp_path):
+    udp = FakeUdpEventSender()
+    client, _, _, _ = make_client(config, token, tmp_path, ha=FakeHomeAssistant(fail=True), udp=udp)
+
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-udp-2"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert [event["phase"] for event in udp.events] == ["start", "error"]
+    assert udp.events[1]["action_id"] == "light_on"
+    assert udp.events[1]["message"] == "Home Assistantへの実行要求に失敗しました。"
+    assert udp.events[1]["error"] == "boom"
+
+
+def test_udp_failure_does_not_block_execution(config, token, tmp_path):
+    udp = FakeUdpEventSender(fail=True)
+    client, ha, log_path, _ = make_client(config, token, tmp_path, udp=udp)
+
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-udp-3"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["executed"] is True
+    assert ha.calls == ["script.demo_light_on"]
+    logs = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert any(log["event"] == "udp_event_failed" and log["phase"] == "start" for log in logs)
+    assert any(log["event"] == "udp_event_failed" and log["phase"] == "done" for log in logs)
+
+
+def test_dry_run_does_not_emit_udp(config, token, tmp_path):
+    udp = FakeUdpEventSender()
+    client, _, _, _ = make_client(config, token, tmp_path, udp=udp)
+
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-udp-4", "dry_run": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["executed"] is False
+    assert udp.events == []
 
 
 def test_config_rejects_non_script_entities():

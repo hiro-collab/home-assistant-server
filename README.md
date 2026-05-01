@@ -53,6 +53,11 @@ home_assistant:
 server:
   api_token_env: "HOME_CONTROL_API_TOKEN"
   log_path: ".cache/home_control/events.jsonl"
+udp_events:
+  enabled: false
+  host: "127.0.0.1"
+  port: 7000
+  event_type: "home_control_magic"
 actions:
   light_on:
     label: "照明をつける"
@@ -67,6 +72,35 @@ actions:
 ```
 
 `ha_script` は `script.*` だけ許可されます。`light.turn_on` や `lock.unlock` のようなHome Assistantサービスは、このブリッジの設定としても受け付けません。
+
+## UDPイベント
+
+TouchDesignerなどの外部演出ツールに、家電操作の開始・完了・失敗をUDP JSONで通知できます。既定では無効です。
+
+```yaml
+udp_events:
+  enabled: true
+  host: "127.0.0.1"
+  port: 7000
+  event_type: "home_control_magic"
+```
+
+`execute` が実際にHome Assistantを呼ぶときだけ送信します。`preview`、`dry_run`、確認待ちの操作では送信しません。UDP送信に失敗しても家電操作は止めず、JSONLログに `udp_event_failed` を残します。
+
+開始時:
+
+```json
+{
+  "type": "home_control_magic",
+  "phase": "start",
+  "action_id": "light_off",
+  "label": "ライトを消す",
+  "source": "dify",
+  "request_id": "..."
+}
+```
+
+成功時は `phase: "done"`、失敗時は `phase: "error"` を送ります。`done` には `message`、`error` には `message` と `error` が追加されます。
 
 ## curl例
 
