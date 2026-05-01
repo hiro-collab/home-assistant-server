@@ -1,0 +1,109 @@
+from __future__ import annotations
+
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+import yaml
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+
+ACTION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_:-]{0,79}$")
+HA_SCRIPT_RE = re.compile(r"^script\.[a-z0-9_]+$")
+
+
+class ConfigError(RuntimeError):
+    """Raised when bridge configuration is missing or invalid."""
+
+
+class HomeAssistantConfig(BaseModel):
+    base_url: str
+    token_env: str = "HOME_ASSISTANT_TOKEN"
+    timeout_seconds: float = Field(default=8.0, gt=0, le=60)
+
+    @field_validator("base_url")
+    @classmethod
+    def normalize_base_url(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("home_assistant.base_url must start with http:// or https://")
+        return value
+
+
+class ServerConfig(BaseModel):
+    api_token_env: str = "HOME_CONTROL_API_TOKEN"
+    log_path: str = ".cache/home_control/events.jsonl"
+
+
+class ActionConfig(BaseModel):
+    label: str
+    ha_script: str
+    confirm_required: bool = False
+    response_text: str
+
+    @field_validator("ha_script")
+    @classmethod
+    def validate_script_entity(cls, value: str) -> str:
+        value = value.strip()
+        if not HA_SCRIPT_RE.match(value):
+            raise ValueError("ha_script must be a Home Assistant script entity such as script.demo_light_on")
+        return value
+
+
+class BridgeConfig(BaseModel):
+    home_assistant: HomeAssistantConfig
+    server: ServerConfig = Field(default_factory=ServerConfig)
+    actions: dict[str, ActionConfig]
+
+    @field_validator("actions")
+    @classmethod
+    def validate_actions(cls, value: dict[str, ActionConfig]) -> dict[str, ActionConfig]:
+        if not value:
+            raise ValueError("at least one action must be configured")
+        for action_id in value:
+            if not ACTION_ID_RE.match(action_id):
+                raise ValueError(f"invalid action_id: {action_id!r}")
+        return value
+
+
+def load_config(path: str | Path | None = None) -> BridgeConfig:
+    config_path = Path(path or os.environ.get("HOME_CONTROL_CONFIG", "config/home-control.yaml"))
+    if not config_path.exists():
+        raise ConfigError(
+            f"Config file not found: {config_path}. Copy config/home-control.example.yaml to this path first."
+        )
+
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ConfigError(f"Could not read config file {config_path}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"Invalid YAML in {config_path}: {exc}") from exc
+
+    if not isinstance(raw, dict):
+        raise ConfigError(f"Config file {config_path} must contain a YAML mapping.")
+
+    try:
+        return BridgeConfig.model_validate(raw)
+    except ValidationError as exc:
+        raise ConfigError(f"Invalid config file {config_path}: {exc}") from exc
+
+
+def get_required_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise ConfigError(f"Required environment variable is not set: {name}")
+    return value
+
+
+def action_preview_payload(action_id: str, action: ActionConfig) -> dict[str, Any]:
+    return {
+        "action_id": action_id,
+        "label": action.label,
+        "ha_service": "script.turn_on",
+        "ha_endpoint": "/api/services/script/turn_on",
+        "ha_script": action.ha_script,
+        "confirm_required": action.confirm_required,
+        "response_text": action.response_text,
+    }

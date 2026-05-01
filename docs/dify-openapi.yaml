@@ -1,0 +1,166 @@
+openapi: 3.1.0
+info:
+  title: Home Control Safety Bridge
+  version: 0.1.0
+  description: >
+    Local HTTP bridge for Dify/AITuberKit/sword-voice-agent. It only exposes
+    configured action_id values and internally calls Home Assistant
+    /api/services/script/turn_on.
+servers:
+  - url: http://127.0.0.1:8787
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      summary: Check bridge and Home Assistant connectivity
+      security: []
+      responses:
+        "200":
+          description: Health result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /actions:
+    get:
+      summary: List allowlisted actions
+      responses:
+        "200":
+          description: Public action summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ActionSummary"
+  /actions/{action_id}/preview:
+    post:
+      summary: Preview an allowlisted action without executing it
+      parameters:
+        - $ref: "#/components/parameters/ActionId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActionRequest"
+      responses:
+        "200":
+          description: Preview result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionResponse"
+        "401":
+          description: Missing or invalid token
+        "404":
+          description: Action is not allowlisted
+  /actions/{action_id}/execute:
+    post:
+      summary: Execute an allowlisted action through Home Assistant script.turn_on
+      parameters:
+        - $ref: "#/components/parameters/ActionId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActionRequest"
+      responses:
+        "200":
+          description: Execution result. ok=false means Home Assistant failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionResponse"
+        "401":
+          description: Missing or invalid token
+        "404":
+          description: Action is not allowlisted
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    ActionId:
+      name: action_id
+      in: path
+      required: true
+      schema:
+        type: string
+      examples:
+        light_on:
+          value: light_on
+        curtain_close:
+          value: curtain_close
+  schemas:
+    HealthResponse:
+      type: object
+      required: [ok, status, home_assistant, actions_count]
+      properties:
+        ok:
+          type: boolean
+        status:
+          type: string
+          enum: [ok, degraded, config_error]
+        home_assistant:
+          type: object
+          additionalProperties: true
+        actions_count:
+          type: integer
+    ActionSummary:
+      type: object
+      required: [action_id, label, confirm_required, response_text]
+      properties:
+        action_id:
+          type: string
+        label:
+          type: string
+        confirm_required:
+          type: boolean
+        response_text:
+          type: string
+    ActionRequest:
+      type: object
+      properties:
+        source:
+          type: string
+          default: dify
+        request_id:
+          type: string
+        user_text:
+          type: string
+        dry_run:
+          type: boolean
+          default: false
+        confirmed:
+          type: boolean
+          default: false
+    ActionResponse:
+      type: object
+      required: [ok, action_id, executed, confirmation_required, message, speak]
+      properties:
+        ok:
+          type: boolean
+        action_id:
+          type: string
+        executed:
+          type: boolean
+        confirmation_required:
+          type: boolean
+        message:
+          type: string
+        speak:
+          type: string
+        request_id:
+          type: string
+          nullable: true
+        preview:
+          type: object
+          nullable: true
+          additionalProperties: true
+        error:
+          type: string
+          nullable: true

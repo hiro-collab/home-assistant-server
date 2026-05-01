@@ -1,0 +1,38 @@
+# Example snippets for Home Assistant configuration.yaml or scripts.yaml.
+# Keep device-specific Matter/SwitchBot details inside Home Assistant.
+
+script:
+  demo_light_on:
+    alias: Demo - light on
+    mode: single
+    sequence:
+      - service: light.turn_on
+        target:
+          entity_id: light.living_room
+
+  demo_light_off:
+    alias: Demo - light off
+    mode: single
+    sequence:
+      - service: light.turn_off
+        target:
+          entity_id: light.living_room
+
+  curtain_close:
+    alias: Close curtain
+    mode: single
+    sequence:
+      - service: cover.close_cover
+        target:
+          entity_id: cover.living_room_curtain
+
+  projection_mode:
+    alias: Projection mode
+    mode: single
+    sequence:
+      - service: light.turn_off
+        target:
+          entity_id: light.ceiling
+      - service: cover.close_cover
+        target:
+          entity_id: cover.living_room_curtain

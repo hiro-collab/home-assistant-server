@@ -1,0 +1,33 @@
+home_assistant:
+  base_url: "http://homeassistant.local:8123"
+  token_env: "HOME_ASSISTANT_TOKEN"
+  timeout_seconds: 8
+
+server:
+  api_token_env: "HOME_CONTROL_API_TOKEN"
+  log_path: ".cache/home_control/events.jsonl"
+
+actions:
+  light_on:
+    label: "照明をつける"
+    ha_script: "script.demo_light_on"
+    confirm_required: false
+    response_text: "照明をつけました。"
+
+  light_off:
+    label: "照明を消す"
+    ha_script: "script.demo_light_off"
+    confirm_required: false
+    response_text: "照明を消しました。"
+
+  curtain_close:
+    label: "カーテンを閉める"
+    ha_script: "script.curtain_close"
+    confirm_required: true
+    response_text: "カーテンを閉めました。"
+
+  projection_mode:
+    label: "プロジェクションモードにする"
+    ha_script: "script.projection_mode"
+    confirm_required: true
+    response_text: "プロジェクションモードにしました。"
