@@ -38,8 +38,13 @@ class HomeAssistantClient:
             }
 
     async def turn_on_script(self, script_entity_id: str) -> dict[str, Any]:
-        url = f"{self.config.base_url}/api/services/script/turn_on"
-        payload = {"entity_id": script_entity_id}
+        return await self.call_service("script.turn_on", {"entity_id": script_entity_id})
+
+    async def call_service(self, service_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        domain, _, service = service_name.partition(".")
+        if not domain or not service:
+            raise HomeAssistantError(f"Invalid Home Assistant service name: {service_name}")
+        url = f"{self.config.base_url}/api/services/{domain}/{service}"
         try:
             async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
                 response = await client.post(url, headers=self._headers(), json=payload)

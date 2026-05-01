@@ -1,6 +1,7 @@
 .cache/
 .env
 .venv/
+config/home-control.yaml
 __pycache__/
 *.py[cod]
 .pytest_cache/

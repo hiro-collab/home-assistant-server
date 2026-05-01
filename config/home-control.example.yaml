@@ -10,13 +10,15 @@ server:
 actions:
   light_on:
     label: "照明をつける"
-    ha_script: "script.demo_light_on"
+    ha_service: "switch.turn_on"
+    entity_id: "switch.demo_light"
     confirm_required: false
     response_text: "照明をつけました。"
 
   light_off:
     label: "照明を消す"
-    ha_script: "script.demo_light_off"
+    ha_service: "switch.turn_off"
+    entity_id: "switch.demo_light"
     confirm_required: false
     response_text: "照明を消しました。"
 
