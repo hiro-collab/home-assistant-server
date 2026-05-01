@@ -7,7 +7,14 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from .audit import JsonlAuditLogger
-from .config import BridgeConfig, ConfigError, action_preview_payload, get_required_env, load_config
+from .config import (
+    BridgeConfig,
+    ConfigError,
+    action_audit_payload,
+    action_preview_payload,
+    get_required_env,
+    load_config,
+)
 from .home_assistant import HomeAssistantClient, HomeAssistantError
 from .schemas import ActionRequest, ActionResponse, ActionSummary, HealthResponse
 
@@ -130,7 +137,7 @@ def create_app(
                 "user_text": body.user_text,
                 "executed": False,
                 "confirm_required": action.confirm_required,
-                "ha_script": action.ha_script,
+                **action_audit_payload(action),
             },
         )
         message = f"{action.label}を実行します。よろしいですか？" if action.confirm_required else action.response_text
@@ -168,7 +175,7 @@ def create_app(
                     "user_text": body.user_text,
                     "executed": False,
                     "confirm_required": True,
-                    "ha_script": action.ha_script,
+                    **action_audit_payload(action),
                 },
             )
             return ActionResponse(
@@ -195,7 +202,7 @@ def create_app(
                     "executed": False,
                     "confirm_required": action.confirm_required,
                     "confirmed": body.confirmed,
-                    "ha_script": action.ha_script,
+                    **action_audit_payload(action),
                 },
             )
             return ActionResponse(
@@ -210,7 +217,10 @@ def create_app(
             )
 
         try:
-            ha_result = await app.state.ha_client.turn_on_script(action.ha_script)
+            ha_result = await app.state.ha_client.call_service(
+                action.service_name(),
+                action.service_payload(),
+            )
         except HomeAssistantError as exc:
             _audit(
                 app,
@@ -223,7 +233,7 @@ def create_app(
                     "executed": False,
                     "confirm_required": action.confirm_required,
                     "confirmed": body.confirmed,
-                    "ha_script": action.ha_script,
+                    **action_audit_payload(action),
                     "error": str(exc),
                 },
             )
@@ -250,7 +260,7 @@ def create_app(
                 "executed": True,
                 "confirm_required": action.confirm_required,
                 "confirmed": body.confirmed,
-                "ha_script": action.ha_script,
+                **action_audit_payload(action),
                 "ha_status_code": ha_result.get("status_code"),
             },
         )

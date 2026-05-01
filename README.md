@@ -2,7 +2,7 @@
 
 Dify / AITuberKit / sword-voice-agent から Home Assistant を安全に操作するためのローカルHTTPブリッジです。
 
-このブリッジは、リクエストから Home Assistant の任意サービス名、任意entity、任意URLを受け取りません。設定ファイルで許可した `action_id` だけを受け付け、内部では Home Assistant REST API の `/api/services/script/turn_on` だけを呼びます。Matter / SwitchBot の違いは Home Assistant の script 側に閉じ込めます。
+このブリッジは、リクエストから Home Assistant の任意サービス名、任意entity、任意URLを受け取りません。設定ファイルで許可した `action_id` だけを受け付け、内部では Home Assistant REST API の設定済みサービスだけを呼びます。複雑な操作、危険な操作、Matter / SwitchBot の差分は Home Assistant の script 側に閉じ込められます。単純な `switch` / `light` / `fan` のON/OFFだけは、Home Assistant scriptを作らずに設定ファイルから直接allowlistできます。
 
 ## API
 
@@ -56,9 +56,16 @@ server:
 actions:
   light_on:
     label: "照明をつける"
-    ha_script: "script.demo_light_on"
+    ha_service: "switch.turn_on"
+    entity_id: "switch.demo_light"
     confirm_required: false
     response_text: "照明をつけました。"
+  light_off:
+    label: "照明を消す"
+    ha_service: "switch.turn_off"
+    entity_id: "switch.demo_light"
+    confirm_required: false
+    response_text: "照明を消しました。"
   curtain_close:
     label: "カーテンを閉める"
     ha_script: "script.curtain_close"
@@ -66,7 +73,12 @@ actions:
     response_text: "カーテンを閉めました。"
 ```
 
-`ha_script` は `script.*` だけ許可されます。`light.turn_on` や `lock.unlock` のようなHome Assistantサービスは、このブリッジの設定としても受け付けません。
+1つのactionには、以下のどちらか一方だけを設定します。
+
+- `ha_script`: `script.*` だけ許可されます。Home Assistant側のscriptを `script.turn_on` で実行します。
+- `ha_service` + `entity_id`: `switch.turn_on/off`、`light.turn_on/off`、`fan.turn_on/off` だけ許可されます。serviceのdomainとentityのdomainは一致している必要があります。
+
+`lock.unlock` や `cover.close_cover` のような操作は直接allowlistできません。必要な場合はHome Assistant側にscriptを作成し、`confirm_required: true` を付けてください。
 
 ## curl例
 
