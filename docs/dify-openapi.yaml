@@ -122,6 +122,9 @@ components:
           type: boolean
         response_text:
           type: string
+        expected_effect:
+          $ref: "#/components/schemas/ExpectedEffect"
+          nullable: true
     ActionRequest:
       type: object
       properties:
@@ -138,16 +141,24 @@ components:
         confirmed:
           type: boolean
           default: false
+        confirmation_token:
+          type: string
+          nullable: true
+          description: One-time token returned by preview/blocked execute for confirm_required actions.
     ActionResponse:
       type: object
-      required: [ok, action_id, executed, confirmation_required, message, speak]
+      required: [ok, action_id, executed, status, confirmation_required, message, speak]
       properties:
         ok:
           type: boolean
         action_id:
           type: string
+          description: Allowlisted action name, not the per-execution correlation id.
         executed:
           type: boolean
+        status:
+          type: string
+          enum: [preview, confirmation_required, dry_run, duplicate, submitted, failed]
         confirmation_required:
           type: boolean
         message:
@@ -157,6 +168,39 @@ components:
         request_id:
           type: string
           nullable: true
+        execution_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Per-execution correlation id issued when the bridge attempts a Home Assistant command.
+        issued_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: UTC timestamp for the Home Assistant command attempt.
+        domain:
+          type: string
+          nullable: true
+          description: Expected-effect domain configured for later observation correlation.
+        service:
+          type: string
+          nullable: true
+          description: Expected-effect service configured for later observation correlation.
+        entity_id:
+          type: string
+          nullable: true
+          description: Expected-effect entity configured for later observation correlation.
+        expected_state:
+          type: string
+          nullable: true
+          description: Expected state configured for later observation correlation. This is not an observed label.
+        expected_effect:
+          $ref: "#/components/schemas/ExpectedEffect"
+          nullable: true
+        confirmation_token:
+          type: string
+          nullable: true
+          description: One-time confirmation token for confirm_required actions.
         preview:
           type: object
           nullable: true
@@ -164,3 +208,16 @@ components:
         error:
           type: string
           nullable: true
+          description: Generic error code. Internal Home Assistant details are not returned.
+    ExpectedEffect:
+      type: object
+      required: [domain, service, entity_id, expected_state]
+      properties:
+        domain:
+          type: string
+        service:
+          type: string
+        entity_id:
+          type: string
+        expected_state:
+          type: string

@@ -10,7 +10,15 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 
 ACTION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_:-]{0,79}$")
+ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 HA_SCRIPT_RE = re.compile(r"^script\.[a-z0-9_]+$")
+PLACEHOLDER_SECRET_PREFIXES = ("change-me", "replace", "example", "dummy")
+PLACEHOLDER_SECRET_VALUES = {
+    "changeme",
+    "change-me-local-bridge-token",
+    "change-me-home-assistant-token",
+    "test-token",
+}
 
 
 class ConfigError(RuntimeError):
@@ -30,10 +38,21 @@ class HomeAssistantConfig(BaseModel):
             raise ValueError("home_assistant.base_url must start with http:// or https://")
         return value
 
+    @field_validator("token_env")
+    @classmethod
+    def validate_token_env_name(cls, value: str) -> str:
+        return _validate_env_name(value)
+
 
 class ServerConfig(BaseModel):
     api_token_env: str = "HOME_CONTROL_API_TOKEN"
     log_path: str = ".cache/home_control/events.jsonl"
+    min_api_token_length: int = Field(default=32, ge=16, le=512)
+
+    @field_validator("api_token_env")
+    @classmethod
+    def validate_api_token_env_name(cls, value: str) -> str:
+        return _validate_env_name(value)
 
 
 class UdpEventsConfig(BaseModel):
@@ -51,11 +70,27 @@ class UdpEventsConfig(BaseModel):
         return value
 
 
+class ExpectedEffectConfig(BaseModel):
+    domain: str = Field(min_length=1, max_length=80)
+    service: str = Field(min_length=1, max_length=80)
+    entity_id: str = Field(min_length=1, max_length=160)
+    expected_state: str = Field(min_length=1, max_length=80)
+
+    @field_validator("domain", "service", "entity_id", "expected_state")
+    @classmethod
+    def normalize_non_empty_string(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be empty")
+        return value
+
+
 class ActionConfig(BaseModel):
     label: str
     ha_script: str
     confirm_required: bool = False
     response_text: str
+    expected_effect: ExpectedEffectConfig | None = None
 
     @field_validator("ha_script")
     @classmethod
@@ -107,14 +142,35 @@ def load_config(path: str | Path | None = None) -> BridgeConfig:
 
 
 def get_required_env(name: str) -> str:
+    name = _validate_env_name(name)
     value = os.environ.get(name)
     if not value:
         raise ConfigError(f"Required environment variable is not set: {name}")
     return value
 
 
+def get_required_secret(name: str, *, min_length: int = 32) -> str:
+    value = get_required_env(name).strip()
+    lowered = value.lower()
+    if len(value) < min_length or lowered in PLACEHOLDER_SECRET_VALUES:
+        raise ConfigError(
+            f"Required environment variable {name} must be a non-placeholder secret "
+            f"with at least {min_length} characters."
+        )
+    if any(lowered.startswith(prefix) for prefix in PLACEHOLDER_SECRET_PREFIXES):
+        raise ConfigError(f"Required environment variable {name} must not use a placeholder value.")
+    return value
+
+
+def _validate_env_name(value: str) -> str:
+    value = value.strip()
+    if not ENV_NAME_RE.match(value):
+        raise ValueError("environment variable names must use uppercase letters, numbers, and underscores")
+    return value
+
+
 def action_preview_payload(action_id: str, action: ActionConfig) -> dict[str, Any]:
-    return {
+    payload = {
         "action_id": action_id,
         "label": action.label,
         "ha_service": "script.turn_on",
@@ -123,3 +179,6 @@ def action_preview_payload(action_id: str, action: ActionConfig) -> dict[str, An
         "confirm_required": action.confirm_required,
         "response_text": action.response_text,
     }
+    if action.expected_effect is not None:
+        payload["expected_effect"] = action.expected_effect.model_dump()
+    return payload

@@ -6,6 +6,7 @@ home_assistant:
 server:
   api_token_env: "HOME_CONTROL_API_TOKEN"
   log_path: ".cache/home_control/events.jsonl"
+  min_api_token_length: 32
 
 udp_events:
   enabled: false
@@ -19,12 +20,22 @@ actions:
     ha_script: "script.demo_light_on"
     confirm_required: false
     response_text: "照明をつけました。"
+    expected_effect:
+      domain: "light"
+      service: "turn_on"
+      entity_id: "light.demo_room"
+      expected_state: "on"
 
   light_off:
     label: "照明を消す"
     ha_script: "script.demo_light_off"
     confirm_required: false
     response_text: "照明を消しました。"
+    expected_effect:
+      domain: "light"
+      service: "turn_off"
+      entity_id: "light.demo_room"
+      expected_state: "off"
 
   curtain_close:
     label: "カーテンを閉める"
