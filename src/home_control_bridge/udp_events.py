@@ -18,6 +18,7 @@ class UdpEventSender:
         *,
         phase: UdpEventPhase,
         action_id: str,
+        execution_id: str | None,
         label: str,
         source: str,
         request_id: str | None,
@@ -35,6 +36,8 @@ class UdpEventSender:
             "source": source,
             "request_id": request_id,
         }
+        if execution_id is not None:
+            payload["execution_id"] = execution_id
         if message is not None:
             payload["message"] = message
         if error is not None:

@@ -67,6 +67,11 @@ actions:
     ha_script: "script.demo_light_on"
     confirm_required: false
     response_text: "照明をつけました。"
+    expected_effect:
+      domain: "light"
+      service: "turn_on"
+      entity_id: "light.demo_room"
+      expected_state: "on"
   curtain_close:
     label: "カーテンを閉める"
     ha_script: "script.curtain_close"
@@ -75,6 +80,8 @@ actions:
 ```
 
 `ha_script` は `script.*` だけ許可されます。`light.turn_on` や `lock.unlock` のようなHome Assistantサービスは、このブリッジの設定としても受け付けません。
+
+`expected_effect` は任意の追跡用メタデータです。Home Assistant へ実際に送るリクエストは引き続き `script.turn_on` だけで、`expected_effect` は後続の観測やユーザー確認と結合するための期待状態を表します。これは確定ラベルではありません。
 
 ## UDPイベント
 
@@ -159,6 +166,30 @@ curl.exe -X POST http://127.0.0.1:8787/actions/light_on/execute `
 
 `request_id` が同じ実行リクエストは短時間重複として扱い、Home Assistant への二重送信を避けます。Dify の `workflow_run_id` など、実行ごとに一意な値を入れてください。
 
+## Action tracking
+
+`execute` が実際に Home Assistant へ命令を送るとき、レスポンスには実行ごとの `execution_id`、`issued_at`、`status` が含まれます。既存の `action_id` は allowlist 上の操作名のままです。
+
+```json
+{
+  "ok": true,
+  "action_id": "light_on",
+  "execution_id": "2c9f9f6a-1f4b-43aa-89ef-4e1c7c73f9d2",
+  "executed": true,
+  "status": "submitted",
+  "issued_at": "2026-05-06T03:20:15.123456+00:00",
+  "domain": "light",
+  "service": "turn_on",
+  "entity_id": "light.demo_room",
+  "expected_state": "on",
+  "message": "照明をつけました。",
+  "speak": "照明をつけました。",
+  "request_id": "demo-2"
+}
+```
+
+`execution_id` は「Home Assistant に命令を出した」単位の correlation id です。camera-hub の観測やユーザー確認で得たラベルは、後続サービス側で `execution_id + observation_id + label` として結合してください。同じ `request_id` の重複リクエストには、元の `execution_id` が返ります。
+
 ## Dify HTTP Request node例
 
 一覧取得:
@@ -205,6 +236,18 @@ curl.exe -X POST http://127.0.0.1:8787/actions/light_on/execute `
 ```
 
 Dify用OpenAPI schemaは [docs/dify-openapi.yaml](docs/dify-openapi.yaml) にあります。FastAPI標準の `/openapi.json` も利用できます。
+
+Dify / sword-voice-agent は、実行レスポンスの `execution_id` を保持して、camera-hub の `observation_id` とユーザー確認ラベルを learner-service へ渡します。
+
+```json
+{
+  "execution_id": "2c9f9f6a-1f4b-43aa-89ef-4e1c7c73f9d2",
+  "action_id": "light_on",
+  "observation_id": "obs_20260506_122018",
+  "label": "on",
+  "label_source": "user_confirmation"
+}
+```
 
 ## Home Assistant script例
 

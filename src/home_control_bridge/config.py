@@ -70,11 +70,27 @@ class UdpEventsConfig(BaseModel):
         return value
 
 
+class ExpectedEffectConfig(BaseModel):
+    domain: str = Field(min_length=1, max_length=80)
+    service: str = Field(min_length=1, max_length=80)
+    entity_id: str = Field(min_length=1, max_length=160)
+    expected_state: str = Field(min_length=1, max_length=80)
+
+    @field_validator("domain", "service", "entity_id", "expected_state")
+    @classmethod
+    def normalize_non_empty_string(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be empty")
+        return value
+
+
 class ActionConfig(BaseModel):
     label: str
     ha_script: str
     confirm_required: bool = False
     response_text: str
+    expected_effect: ExpectedEffectConfig | None = None
 
     @field_validator("ha_script")
     @classmethod
@@ -154,7 +170,7 @@ def _validate_env_name(value: str) -> str:
 
 
 def action_preview_payload(action_id: str, action: ActionConfig) -> dict[str, Any]:
-    return {
+    payload = {
         "action_id": action_id,
         "label": action.label,
         "ha_service": "script.turn_on",
@@ -163,3 +179,6 @@ def action_preview_payload(action_id: str, action: ActionConfig) -> dict[str, An
         "confirm_required": action.confirm_required,
         "response_text": action.response_text,
     }
+    if action.expected_effect is not None:
+        payload["expected_effect"] = action.expected_effect.model_dump()
+    return payload

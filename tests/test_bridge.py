@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -58,6 +59,12 @@ def config(tmp_path):
                     "ha_script": "script.demo_light_on",
                     "confirm_required": False,
                     "response_text": "照明をつけました。",
+                    "expected_effect": {
+                        "domain": "light",
+                        "service": "turn_on",
+                        "entity_id": "light.demo_room",
+                        "expected_state": "on",
+                    },
                 },
                 "curtain_close": {
                     "label": "カーテンを閉める",
@@ -87,6 +94,10 @@ def make_client(config, token, tmp_path, ha=None, udp=None):
 
 def auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def assert_uuid(value: str) -> None:
+    assert str(UUID(value)) == value
 
 
 def test_health_is_available_without_bridge_token(config, token, tmp_path):
@@ -152,6 +163,41 @@ def test_post_body_is_optional(config, token, tmp_path):
     assert response.status_code == 200
     assert response.json()["executed"] is True
     assert ha.calls == ["script.demo_light_on"]
+
+
+def test_execute_returns_tracking_metadata_and_logs_it(config, token, tmp_path):
+    client, _, log_path, _ = make_client(config, token, tmp_path)
+
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-track-1", "user_text": "照明をつけて"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["action_id"] == "light_on"
+    assert_uuid(body["execution_id"])
+    assert body["issued_at"].endswith("+00:00")
+    assert body["status"] == "submitted"
+    assert body["domain"] == "light"
+    assert body["service"] == "turn_on"
+    assert body["entity_id"] == "light.demo_room"
+    assert body["expected_state"] == "on"
+    assert body["expected_effect"] == {
+        "domain": "light",
+        "service": "turn_on",
+        "entity_id": "light.demo_room",
+        "expected_state": "on",
+    }
+
+    log = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+    assert log["event"] == "execute_succeeded"
+    assert log["action_id"] == "light_on"
+    assert log["execution_id"] == body["execution_id"]
+    assert log["issued_at"] == body["issued_at"]
+    assert log["status"] == "submitted"
+    assert log["expected_effect"] == body["expected_effect"]
 
 
 def test_execute_rejects_unexpected_payload_fields(config, token, tmp_path):
@@ -267,10 +313,12 @@ def test_execute_emits_udp_start_and_done(config, token, tmp_path):
 
     assert response.status_code == 200
     assert response.json()["executed"] is True
+    execution_id = response.json()["execution_id"]
     assert udp.events == [
         {
             "phase": "start",
             "action_id": "light_on",
+            "execution_id": execution_id,
             "label": "照明をつける",
             "source": "dify",
             "request_id": "req-udp-1",
@@ -280,6 +328,7 @@ def test_execute_emits_udp_start_and_done(config, token, tmp_path):
         {
             "phase": "done",
             "action_id": "light_on",
+            "execution_id": execution_id,
             "label": "照明をつける",
             "source": "dify",
             "request_id": "req-udp-1",
@@ -301,7 +350,10 @@ def test_execute_emits_udp_error_on_home_assistant_failure(config, token, tmp_pa
 
     assert response.status_code == 200
     assert response.json()["ok"] is False
+    assert_uuid(response.json()["execution_id"])
     assert [event["phase"] for event in udp.events] == ["start", "error"]
+    assert udp.events[0]["execution_id"] == response.json()["execution_id"]
+    assert udp.events[1]["execution_id"] == response.json()["execution_id"]
     assert udp.events[1]["action_id"] == "light_on"
     assert udp.events[1]["message"] == "Home Assistantへの実行要求に失敗しました。"
     assert udp.events[1]["error"] == "home_assistant_request_failed"
@@ -358,6 +410,9 @@ def test_duplicate_request_id_is_not_executed_twice(config, token, tmp_path):
     assert first.json()["executed"] is True
     assert second.status_code == 200
     assert second.json()["executed"] is False
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["execution_id"] == first.json()["execution_id"]
+    assert second.json()["issued_at"] == first.json()["issued_at"]
     assert ha.calls == ["script.demo_light_on"]
     logs = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert any(log["event"] == "execute_duplicate_request" for log in logs)

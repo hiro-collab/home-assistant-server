@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import secrets
+from datetime import UTC, datetime
 from time import monotonic
 from typing import Annotated
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -122,6 +124,7 @@ def create_app(
                 label=action.label,
                 confirm_required=action.confirm_required,
                 response_text=action.response_text,
+                expected_effect=_expected_effect_payload(action),
             )
             for action_id, action in sorted(config.actions.items())
         ]
@@ -154,12 +157,14 @@ def create_app(
             ok=True,
             action_id=action_id,
             executed=False,
+            status="preview",
             confirmation_required=action.confirm_required,
             message=message,
             speak=message,
             request_id=body.request_id,
             confirmation_token=confirmation_token,
             preview=preview,
+            **_response_tracking_fields(action),
         )
 
     @app.post(
@@ -197,12 +202,14 @@ def create_app(
                 ok=True,
                 action_id=action_id,
                 executed=False,
+                status="confirmation_required",
                 confirmation_required=True,
                 message=message,
                 speak=message,
                 request_id=body.request_id,
                 confirmation_token=confirmation_token,
                 preview=preview,
+                **_response_tracking_fields(action),
             )
 
         if body.dry_run:
@@ -223,40 +230,53 @@ def create_app(
                 ok=True,
                 action_id=action_id,
                 executed=False,
+                status="dry_run",
                 confirmation_required=action.confirm_required,
                 message=message,
                 speak=message,
                 request_id=body.request_id,
                 preview=preview,
+                **_response_tracking_fields(action),
             )
 
-        if _is_duplicate_execution(app, action_id, body.request_id):
+        duplicate_execution = _get_execution_request(app, action_id, body.request_id)
+        if duplicate_execution is not None:
             message = "同じ request_id の操作はすでに受け付け済みです。"
             _audit(
                 app,
                 {
                     "event": "execute_duplicate_request",
                     "action_id": action_id,
+                    "execution_id": duplicate_execution["execution_id"],
+                    "issued_at": duplicate_execution["issued_at"],
+                    "status": "duplicate",
                     **_request_audit_fields(body),
                     "executed": False,
                     "confirm_required": action.confirm_required,
                     "confirmed": body.confirmed,
                     "ha_script": action.ha_script,
+                    **_expected_effect_audit_fields(action),
                 },
             )
             return ActionResponse(
                 ok=True,
                 action_id=action_id,
                 executed=False,
+                status="duplicate",
                 confirmation_required=action.confirm_required,
                 message=message,
                 speak=message,
                 request_id=body.request_id,
+                execution_id=duplicate_execution["execution_id"],
+                issued_at=duplicate_execution["issued_at"],
                 preview=preview,
+                **_response_tracking_fields(action),
             )
 
-        _register_execution_request(app, action_id, body.request_id)
-        _emit_action_event(app, "start", action_id, action, body)
+        execution_id = str(uuid4())
+        issued_at = _utc_now_iso()
+        _register_execution_request(app, action_id, body.request_id, execution_id, issued_at)
+        _emit_action_event(app, "start", action_id, action, body, execution_id=execution_id)
 
         try:
             ha_result = await app.state.ha_client.turn_on_script(action.ha_script)
@@ -267,11 +287,15 @@ def create_app(
                 {
                     "event": "execute_failed",
                     "action_id": action_id,
+                    "execution_id": execution_id,
+                    "issued_at": issued_at,
+                    "status": "failed",
                     **_request_audit_fields(body),
                     "executed": False,
                     "confirm_required": action.confirm_required,
                     "confirmed": body.confirmed,
                     "ha_script": action.ha_script,
+                    **_expected_effect_audit_fields(action),
                     "error": error_detail,
                 },
             )
@@ -281,6 +305,7 @@ def create_app(
                 action_id,
                 action,
                 body,
+                execution_id=execution_id,
                 message="Home Assistantへの実行要求に失敗しました。",
                 error=HOME_ASSISTANT_ERROR_CODE,
             )
@@ -288,11 +313,15 @@ def create_app(
                 ok=False,
                 action_id=action_id,
                 executed=False,
+                status="failed",
                 confirmation_required=action.confirm_required,
                 message="Home Assistantへの実行要求に失敗しました。",
                 speak="家電操作に失敗しました。",
                 request_id=body.request_id,
+                execution_id=execution_id,
+                issued_at=issued_at,
                 preview=preview,
+                **_response_tracking_fields(action),
                 error=HOME_ASSISTANT_ERROR_CODE,
             )
 
@@ -301,24 +330,32 @@ def create_app(
             {
                 "event": "execute_succeeded",
                 "action_id": action_id,
+                "execution_id": execution_id,
+                "issued_at": issued_at,
+                "status": "submitted",
                 **_request_audit_fields(body),
                 "executed": True,
                 "confirm_required": action.confirm_required,
                 "confirmed": body.confirmed,
                 "ha_script": action.ha_script,
+                **_expected_effect_audit_fields(action),
                 "ha_status_code": ha_result.get("status_code"),
             },
         )
-        _emit_action_event(app, "done", action_id, action, body, message=action.response_text)
+        _emit_action_event(app, "done", action_id, action, body, execution_id=execution_id, message=action.response_text)
         return ActionResponse(
             ok=True,
             action_id=action_id,
             executed=True,
+            status="submitted",
             confirmation_required=action.confirm_required,
             message=action.response_text,
             speak=action.response_text,
             request_id=body.request_id,
+            execution_id=execution_id,
+            issued_at=issued_at,
             preview=preview,
+            **_response_tracking_fields(action),
         )
 
     return app
@@ -364,23 +401,40 @@ def _execution_key(action_id: str, request_id: str) -> str:
     return f"{action_id}\0{request_id}"
 
 
-def _is_duplicate_execution(app: FastAPI, action_id: str, request_id: str | None) -> bool:
+def _get_execution_request(app: FastAPI, action_id: str, request_id: str | None) -> dict[str, str] | None:
     _prune_execution_requests(app)
     if not request_id:
-        return False
-    return _execution_key(action_id, request_id) in app.state.execution_requests
+        return None
+    record = app.state.execution_requests.get(_execution_key(action_id, request_id))
+    if record is None:
+        return None
+    return {
+        "execution_id": record["execution_id"],
+        "issued_at": record["issued_at"],
+    }
 
 
-def _register_execution_request(app: FastAPI, action_id: str, request_id: str | None) -> None:
+def _register_execution_request(
+    app: FastAPI,
+    action_id: str,
+    request_id: str | None,
+    execution_id: str,
+    issued_at: str,
+) -> None:
     _prune_execution_requests(app)
     if not request_id:
         return
-    app.state.execution_requests[_execution_key(action_id, request_id)] = monotonic() + EXECUTION_REQUEST_TTL_SECONDS
+    app.state.execution_requests[_execution_key(action_id, request_id)] = {
+        "expires_at": monotonic() + EXECUTION_REQUEST_TTL_SECONDS,
+        "execution_id": execution_id,
+        "issued_at": issued_at,
+    }
 
 
 def _prune_execution_requests(app: FastAPI) -> None:
     now = monotonic()
-    for key, expires_at in list(app.state.execution_requests.items()):
+    for key, record in list(app.state.execution_requests.items()):
+        expires_at = record["expires_at"]
         if expires_at < now:
             app.state.execution_requests.pop(key, None)
 
@@ -403,6 +457,39 @@ def _request_audit_fields(body: ActionRequest) -> dict[str, object]:
     return fields
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _expected_effect_payload(action: ActionConfig) -> dict[str, str] | None:
+    if action.expected_effect is None:
+        return None
+    return action.expected_effect.model_dump()
+
+
+def _response_tracking_fields(action: ActionConfig) -> dict[str, object]:
+    effect = _expected_effect_payload(action)
+    fields: dict[str, object] = {"expected_effect": effect}
+    if effect is None:
+        return fields
+    fields.update(
+        {
+            "domain": effect["domain"],
+            "service": effect["service"],
+            "entity_id": effect["entity_id"],
+            "expected_state": effect["expected_state"],
+        }
+    )
+    return fields
+
+
+def _expected_effect_audit_fields(action: ActionConfig) -> dict[str, object]:
+    effect = _expected_effect_payload(action)
+    if effect is None:
+        return {}
+    return {"expected_effect": effect}
+
+
 def _audit(app: FastAPI, event: dict) -> None:
     logger = app.state.audit_logger
     if logger is not None:
@@ -416,6 +503,7 @@ def _emit_action_event(
     action: ActionConfig,
     body: ActionRequest,
     *,
+    execution_id: str | None = None,
     message: str | None = None,
     error: str | None = None,
 ) -> None:
@@ -427,6 +515,7 @@ def _emit_action_event(
         sender.emit(
             phase=phase,
             action_id=action_id,
+            execution_id=execution_id,
             label=action.label,
             source=body.source,
             request_id=body.request_id,
@@ -440,6 +529,7 @@ def _emit_action_event(
                 "event": "udp_event_failed",
                 "phase": phase,
                 "action_id": action_id,
+                "execution_id": execution_id,
                 "source": body.source,
                 "request_id": body.request_id,
                 "error": str(exc),
