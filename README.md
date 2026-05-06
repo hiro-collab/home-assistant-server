@@ -201,7 +201,7 @@ curl.exe -X POST http://127.0.0.1:8787/actions/light_on/execute `
 
 ## Fault injection
 
-E2E検証用に、Home Assistantへ実リクエストを送らず `execute` の応答を差し替える fault injection を設定できます。既定では完全に無効です。`faults.enabled: true` または `HOME_CONTROL_FAULT_MODE=1` のときだけ有効になります。本番環境では有効化しないでください。
+E2E検証用に、Home Assistantへ実リクエストを送らず `execute` の応答を差し替える fault injection を設定できます。既定では完全に無効です。誤有効化を避けるため、`faults.enabled: true` と `HOME_CONTROL_FAULT_MODE=1` の両方が揃ったときだけ有効になります。本番環境では有効化しないでください。
 
 ```yaml
 faults:
@@ -211,12 +211,12 @@ faults:
     - match:
         source: "dify"
         action_id: "light_off"
-        request_id_regex: "^e2e-light-off"
+        request_id_prefix: "e2e-light-off"
       scenario: "fail_once_then_success"
       message: "simulated transient failure"
 ```
 
-`match` は `action_id`、`source`、`request_id`、`request_id_prefix`、`request_id_suffix`、`request_id_regex`、`user_text_contains`、`user_text_regex`、`confirmed` を指定できます。外部workflow固有のIDは扱わず、`request_id` と `execution_id` を correlation id として使います。
+`match` は `action_id`、`source`、`request_id`、`request_id_prefix`、`request_id_suffix`、`request_id_regex`、`user_text_contains`、`user_text_regex`、`confirmed` を指定できます。正規表現はテスト用の短く単純なものに限定され、危険なネスト量指定子や後方参照は設定ロード時に拒否されます。外部workflow固有のIDは扱わず、`request_id` と `execution_id` を correlation id として使います。
 
 利用できる `scenario` は以下です。
 
@@ -229,9 +229,9 @@ faults:
 - `unsupported_action`
 - `duplicate`
 
-`fail_once_then_success`、`fail_twice_then_success`、`timeout_once` は、同じrule・`action_id`・`source`・正規化済み `request_id` ごとにattemptを数えます。`request_id` 末尾の `-attempt-1`、`-try-2`、`-retry-3` のような表現は同じ試行系列として扱います。
+`fail_once_then_success`、`fail_twice_then_success`、`timeout_once` は、同じrule・`action_id`・`source`・正規化済み `request_id` ごとにattemptを数えます。`request_id` 末尾の `-attempt-1`、`-try-2`、`-retry-3` のような表現は同じ試行系列として扱います。attempt状態は短時間で失効し、保持数にも上限があります。
 
-faultが発火すると操作ログに `event: "fault_injected"`、`source`、`action_id`、`request_id`、`scenario`、`attempt`、`status` を記録します。API token、confirmation token、ユーザー発話本文は保存しません。`GET /health` では `fault_mode` と `fault_rules_count` を返します。
+faultが発火すると操作ログに `event: "fault_injected"`、`source`、`action_id`、`request_id`、`scenario`、`attempt`、`status` を記録します。API token、confirmation token、ユーザー発話本文は保存しません。未認証の `GET /health` では fault mode の有効状態やルール数を公開しません。
 
 ## Dify HTTP Request node例
 

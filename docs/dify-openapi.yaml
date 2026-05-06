@@ -112,10 +112,10 @@ components:
           type: integer
         fault_mode:
           type: boolean
-          description: True when fault injection is explicitly enabled by config or environment.
+          description: Always false on unauthenticated health responses; fault injection state is not disclosed.
         fault_rules_count:
           type: integer
-          description: Number of configured fault injection rules.
+          description: Always 0 on unauthenticated health responses; configured rule count is not disclosed.
     ActionSummary:
       type: object
       required: [action_id, label, confirm_required, response_text]

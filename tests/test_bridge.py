@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from home_control_bridge.app import create_app
 from home_control_bridge.audit import JsonlAuditLogger
 from home_control_bridge.config import BridgeConfig, ConfigError, get_required_secret
+from home_control_bridge.faults import FaultContext, MAX_FAULT_ATTEMPT_STATE, evaluate_fault
 
 
 class FakeUdpEventSender:
@@ -83,6 +84,12 @@ def token(monkeypatch):
     monkeypatch.setenv("HOME_CONTROL_API_TOKEN", value)
     monkeypatch.delenv("HOME_CONTROL_FAULT_MODE", raising=False)
     return value
+
+
+@pytest.fixture
+def fault_mode(monkeypatch, token):
+    del token
+    monkeypatch.setenv("HOME_CONTROL_FAULT_MODE", "1")
 
 
 def make_client(config, token, tmp_path, ha=None, udp=None):
@@ -476,7 +483,7 @@ def test_fault_mode_off_ignores_configured_faults(config, token, tmp_path):
     assert all(log["event"] != "fault_injected" for log in read_logs(log_path))
 
 
-def test_fault_mode_can_be_enabled_by_env(config, token, tmp_path, monkeypatch):
+def test_fault_mode_requires_config_and_env(config, token, tmp_path, monkeypatch):
     fault_config = config_with_faults(
         config,
         [{"match": {"source": "dify", "action_id": "light_on"}, "scenario": "always_success"}],
@@ -493,14 +500,15 @@ def test_fault_mode_can_be_enabled_by_env(config, token, tmp_path, monkeypatch):
     )
 
     assert health.status_code == 200
-    assert health.json()["fault_mode"] is True
-    assert health.json()["fault_rules_count"] == 1
+    assert health.json()["fault_mode"] is False
+    assert health.json()["fault_rules_count"] == 0
     assert response.status_code == 200
     assert response.json()["status"] == "submitted"
-    assert ha.calls == []
+    assert ha.calls == ["script.demo_light_on"]
 
 
-def test_fault_always_success_returns_submitted_without_home_assistant(config, token, tmp_path):
+def test_fault_always_success_returns_submitted_without_home_assistant(config, token, fault_mode, tmp_path):
+    del fault_mode
     fault_config = config_with_faults(
         config,
         [{"match": {"source": "dify", "action_id": "light_on"}, "scenario": "always_success"}],
@@ -540,10 +548,12 @@ def test_fault_always_success_returns_submitted_without_home_assistant(config, t
 def test_fault_transient_scenarios_track_attempts_by_normalized_request_id(
     config,
     token,
+    fault_mode,
     tmp_path,
     scenario,
     expected_statuses,
 ):
+    del fault_mode
     fault_config = config_with_faults(
         config,
         [
@@ -577,7 +587,8 @@ def test_fault_transient_scenarios_track_attempts_by_normalized_request_id(
     assert [log["attempt"] for log in read_logs(log_path)] == list(range(1, len(expected_statuses) + 1))
 
 
-def test_fault_fail_always_returns_failed_without_home_assistant(config, token, tmp_path):
+def test_fault_fail_always_returns_failed_without_home_assistant(config, token, fault_mode, tmp_path):
+    del fault_mode
     fault_config = config_with_faults(
         config,
         [{"match": {"action_id": "light_on", "user_text_contains": "照明"}, "scenario": "fail_always"}],
@@ -598,7 +609,8 @@ def test_fault_fail_always_returns_failed_without_home_assistant(config, token, 
     assert read_logs(log_path)[0]["scenario"] == "fail_always"
 
 
-def test_fault_confirmation_required_uses_one_time_token(config, token, tmp_path):
+def test_fault_confirmation_required_uses_one_time_token(config, token, fault_mode, tmp_path):
+    del fault_mode
     fault_config = config_with_faults(
         config,
         [{"match": {"action_id": "light_on"}, "scenario": "confirmation_required"}],
@@ -642,7 +654,8 @@ def test_fault_confirmation_required_uses_one_time_token(config, token, tmp_path
     ]
 
 
-def test_fault_unsupported_action_can_simulate_unallowlisted_response(config, token, tmp_path):
+def test_fault_unsupported_action_can_simulate_unallowlisted_response(config, token, fault_mode, tmp_path):
+    del fault_mode
     fault_config = config_with_faults(
         config,
         [
@@ -668,7 +681,8 @@ def test_fault_unsupported_action_can_simulate_unallowlisted_response(config, to
     assert read_logs(log_path)[0]["scenario"] == "unsupported_action"
 
 
-def test_fault_duplicate_scenario_does_not_break_existing_duplicate_tracking(config, token, tmp_path):
+def test_fault_duplicate_scenario_does_not_break_existing_duplicate_tracking(config, token, fault_mode, tmp_path):
+    del fault_mode
     fault_config = config_with_faults(
         config,
         [
@@ -707,6 +721,43 @@ def test_fault_duplicate_scenario_does_not_break_existing_duplicate_tracking(con
     logs = read_logs(log_path)
     assert logs[0]["event"] == "fault_injected"
     assert any(log["event"] == "execute_duplicate_request" for log in logs)
+
+
+def test_fault_attempt_state_is_bounded(config, fault_mode):
+    del fault_mode
+    fault_config = config_with_faults(
+        config,
+        [{"match": {"action_id": "light_on"}, "scenario": "fail_once_then_success"}],
+    )
+    state = {}
+
+    for index in range(MAX_FAULT_ATTEMPT_STATE + 20):
+        evaluate_fault(
+            fault_config,
+            state,
+            FaultContext(
+                action_id="light_on",
+                source="dify",
+                request_id=f"req-{index}",
+                user_text=None,
+                confirmed=False,
+            ),
+        )
+
+    assert len(state) <= MAX_FAULT_ATTEMPT_STATE
+
+
+def test_config_rejects_potentially_catastrophic_fault_regex(config):
+    with pytest.raises(ValidationError):
+        config_with_faults(
+            config,
+            [
+                {
+                    "match": {"user_text_regex": "(a+)+$"},
+                    "scenario": "fail_always",
+                }
+            ],
+        )
 
 
 def test_placeholder_bridge_token_is_rejected(monkeypatch):

@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 ACTION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_:-]{0,79}$")
 ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 HA_SCRIPT_RE = re.compile(r"^script\.[a-z0-9_]+$")
+NESTED_REGEX_QUANTIFIER_RE = re.compile(r"\([^)]*[+*{][^)]*\)\s*[+*{]")
+REGEX_BACKREFERENCE_RE = re.compile(r"\\[1-9]")
 PLACEHOLDER_SECRET_PREFIXES = ("change-me", "replace", "example", "dummy")
 PLACEHOLDER_SECRET_VALUES = {
     "changeme",
@@ -103,9 +105,9 @@ class FaultMatchConfig(BaseModel):
     request_id: str | None = Field(default=None, max_length=160)
     request_id_prefix: str | None = Field(default=None, max_length=160)
     request_id_suffix: str | None = Field(default=None, max_length=160)
-    request_id_regex: str | None = Field(default=None, max_length=500)
+    request_id_regex: str | None = Field(default=None, max_length=120)
     user_text_contains: str | None = Field(default=None, max_length=200)
-    user_text_regex: str | None = Field(default=None, max_length=500)
+    user_text_regex: str | None = Field(default=None, max_length=120)
     confirmed: bool | None = None
 
     @field_validator(
@@ -137,6 +139,8 @@ class FaultMatchConfig(BaseModel):
     def validate_regex(cls, value: str | None) -> str | None:
         if value is None:
             return None
+        if NESTED_REGEX_QUANTIFIER_RE.search(value) or REGEX_BACKREFERENCE_RE.search(value):
+            raise ValueError("fault regex must not use nested quantifiers or backreferences")
         try:
             re.compile(value)
         except re.error as exc:

@@ -18,7 +18,7 @@ faults:
   enabled: false
   enabled_env: "HOME_CONTROL_FAULT_MODE"
   rules:
-    # Fault injection is ignored unless faults.enabled is true or HOME_CONTROL_FAULT_MODE=1.
+    # Fault injection is ignored unless both faults.enabled is true and HOME_CONTROL_FAULT_MODE=1.
     - match:
         source: "dify"
         action_id: "light_off"
@@ -27,7 +27,7 @@ faults:
     - match:
         source: "dify"
         action_id: "light_on"
-        request_id_regex: "^e2e-confirm"
+        request_id_prefix: "e2e-confirm"
       scenario: "confirmation_required"
       message: "simulated confirmation required"
 

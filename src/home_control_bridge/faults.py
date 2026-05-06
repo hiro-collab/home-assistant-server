@@ -3,12 +3,15 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from time import monotonic
 from typing import Literal
 
 from .config import BridgeConfig, FaultRuleConfig, FaultScenario
 
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 ATTEMPT_SUFFIX_RE = re.compile(r"(?i)(?:[-_:](?:attempt|try|retry)[-_:]?\d+)$")
+FAULT_ATTEMPT_TTL_SECONDS = 600
+MAX_FAULT_ATTEMPT_STATE = 256
 
 FaultOutcome = Literal[
     "success",
@@ -37,20 +40,27 @@ class FaultDecision:
     message: str | None
 
 
+@dataclass(frozen=True)
+class FaultAttemptRecord:
+    attempt: int
+    expires_at: float
+
+
 def fault_mode_enabled(config: BridgeConfig) -> bool:
     env_value = os.environ.get(config.faults.enabled_env, "").strip().lower()
-    return config.faults.enabled or env_value in TRUTHY_ENV_VALUES
+    return config.faults.enabled and env_value in TRUTHY_ENV_VALUES
 
 
 def evaluate_fault(
     config: BridgeConfig,
-    state: dict[str, int],
+    state: dict[str, FaultAttemptRecord],
     context: FaultContext,
     *,
     scenarios: set[FaultScenario] | None = None,
 ) -> FaultDecision | None:
     if not fault_mode_enabled(config):
         return None
+    _prune_attempt_state(state)
 
     for index, rule in enumerate(config.faults.rules):
         if scenarios is not None and rule.scenario not in scenarios:
@@ -59,8 +69,14 @@ def evaluate_fault(
             continue
 
         key = _state_key(index, context)
-        attempt = state.get(key, 0) + 1
-        state[key] = attempt
+        record = state.get(key)
+        attempt = (record.attempt if record is not None else 0) + 1
+        if record is None:
+            _reserve_attempt_slot(state)
+        state[key] = FaultAttemptRecord(
+            attempt=attempt,
+            expires_at=monotonic() + FAULT_ATTEMPT_TTL_SECONDS,
+        )
         outcome = _scenario_outcome(rule.scenario, attempt)
         return FaultDecision(
             rule_index=index,
@@ -71,6 +87,20 @@ def evaluate_fault(
         )
 
     return None
+
+
+def _prune_attempt_state(state: dict[str, FaultAttemptRecord]) -> None:
+    now = monotonic()
+    for key, record in list(state.items()):
+        if record.expires_at < now:
+            state.pop(key, None)
+
+
+def _reserve_attempt_slot(state: dict[str, FaultAttemptRecord]) -> None:
+    if len(state) < MAX_FAULT_ATTEMPT_STATE:
+        return
+    oldest_key = min(state, key=lambda key: state[key].expires_at)
+    state.pop(oldest_key, None)
 
 
 def _matches(rule: FaultRuleConfig, context: FaultContext) -> bool:

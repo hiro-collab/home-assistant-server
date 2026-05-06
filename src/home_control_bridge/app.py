@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 
 from .audit import JsonlAuditLogger
 from .config import ActionConfig, BridgeConfig, ConfigError, action_preview_payload, get_required_secret, load_config
-from .faults import FaultContext, FaultDecision, evaluate_fault, fault_mode_enabled
+from .faults import FaultContext, FaultDecision, evaluate_fault
 from .home_assistant import HomeAssistantClient, HomeAssistantError
 from .schemas import ActionRequest, ActionResponse, ActionSummary, HealthResponse
 from .udp_events import UdpEventPhase, UdpEventSender
@@ -109,8 +109,8 @@ def create_app(
                 status="config_error",
                 home_assistant={"ok": False, "error": GENERIC_CONFIG_ERROR},
                 actions_count=len(app.state.config.actions),
-                fault_mode=fault_mode_enabled(app.state.config),
-                fault_rules_count=len(app.state.config.faults.rules),
+                fault_mode=False,
+                fault_rules_count=0,
             )
         ha_status = await app.state.ha_client.check_connection()
         ok = bool(ha_status.get("ok"))
@@ -119,8 +119,8 @@ def create_app(
             status="ok" if ok else "degraded",
             home_assistant=ha_status,
             actions_count=len(app.state.config.actions),
-            fault_mode=fault_mode_enabled(app.state.config),
-            fault_rules_count=len(app.state.config.faults.rules),
+            fault_mode=False,
+            fault_rules_count=0,
         )
 
     @app.get("/actions", response_model=list[ActionSummary], dependencies=[Depends(require_auth)])
