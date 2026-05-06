@@ -545,6 +545,7 @@ def test_fault_always_success_returns_submitted_without_home_assistant(config, t
         ("timeout_once", ["failed", "submitted"]),
     ],
 )
+@pytest.mark.parametrize("attempt_suffix", ["attempt", "hca"])
 def test_fault_transient_scenarios_track_attempts_by_normalized_request_id(
     config,
     token,
@@ -552,6 +553,7 @@ def test_fault_transient_scenarios_track_attempts_by_normalized_request_id(
     tmp_path,
     scenario,
     expected_statuses,
+    attempt_suffix,
 ):
     del fault_mode
     fault_config = config_with_faults(
@@ -573,7 +575,7 @@ def test_fault_transient_scenarios_track_attempts_by_normalized_request_id(
         client.post(
             "/actions/light_on/execute",
             headers=auth_headers(token),
-            json={"source": "dify", "request_id": f"workflow-1-attempt-{index}"},
+            json={"source": "dify", "request_id": f"workflow-1-{attempt_suffix}-{index}"},
         )
         for index in range(1, len(expected_statuses) + 1)
     ]

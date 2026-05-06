@@ -9,7 +9,7 @@ from typing import Literal
 from .config import BridgeConfig, FaultRuleConfig, FaultScenario
 
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
-ATTEMPT_SUFFIX_RE = re.compile(r"(?i)(?:[-_:](?:attempt|try|retry)[-_:]?\d+)$")
+ATTEMPT_SUFFIX_RE = re.compile(r"(?i)(?:[-_:](?:attempt|try|retry|hca)[-_:]?\d+)$")
 FAULT_ATTEMPT_TTL_SECONDS = 600
 MAX_FAULT_ATTEMPT_STATE = 256
 
