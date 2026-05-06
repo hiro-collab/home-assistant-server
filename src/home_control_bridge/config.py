@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -85,6 +85,90 @@ class ExpectedEffectConfig(BaseModel):
         return value
 
 
+FaultScenario = Literal[
+    "always_success",
+    "fail_once_then_success",
+    "fail_twice_then_success",
+    "fail_always",
+    "confirmation_required",
+    "timeout_once",
+    "unsupported_action",
+    "duplicate",
+]
+
+
+class FaultMatchConfig(BaseModel):
+    action_id: str | None = Field(default=None, max_length=80)
+    source: str | None = Field(default=None, max_length=80)
+    request_id: str | None = Field(default=None, max_length=160)
+    request_id_prefix: str | None = Field(default=None, max_length=160)
+    request_id_suffix: str | None = Field(default=None, max_length=160)
+    request_id_regex: str | None = Field(default=None, max_length=500)
+    user_text_contains: str | None = Field(default=None, max_length=200)
+    user_text_regex: str | None = Field(default=None, max_length=500)
+    confirmed: bool | None = None
+
+    @field_validator(
+        "action_id",
+        "source",
+        "request_id",
+        "request_id_prefix",
+        "request_id_suffix",
+        "request_id_regex",
+        "user_text_contains",
+        "user_text_regex",
+    )
+    @classmethod
+    def normalize_optional_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @field_validator("action_id")
+    @classmethod
+    def validate_optional_action_id(cls, value: str | None) -> str | None:
+        if value is not None and not ACTION_ID_RE.match(value):
+            raise ValueError("invalid action_id")
+        return value
+
+    @field_validator("request_id_regex", "user_text_regex")
+    @classmethod
+    def validate_regex(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            re.compile(value)
+        except re.error as exc:
+            raise ValueError(f"invalid regex: {exc}") from exc
+        return value
+
+
+class FaultRuleConfig(BaseModel):
+    match: FaultMatchConfig = Field(default_factory=FaultMatchConfig)
+    scenario: FaultScenario
+    message: str | None = Field(default=None, max_length=500)
+
+    @field_validator("message")
+    @classmethod
+    def normalize_message(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+
+class FaultInjectionConfig(BaseModel):
+    enabled: bool = False
+    enabled_env: str = "HOME_CONTROL_FAULT_MODE"
+    rules: list[FaultRuleConfig] = Field(default_factory=list)
+
+    @field_validator("enabled_env")
+    @classmethod
+    def validate_enabled_env_name(cls, value: str) -> str:
+        return _validate_env_name(value)
+
+
 class ActionConfig(BaseModel):
     label: str
     ha_script: str
@@ -105,6 +189,7 @@ class BridgeConfig(BaseModel):
     home_assistant: HomeAssistantConfig
     server: ServerConfig = Field(default_factory=ServerConfig)
     udp_events: UdpEventsConfig = Field(default_factory=UdpEventsConfig)
+    faults: FaultInjectionConfig = Field(default_factory=FaultInjectionConfig)
     actions: dict[str, ActionConfig]
 
     @field_validator("actions")

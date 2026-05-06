@@ -61,6 +61,15 @@ udp_events:
   host: "127.0.0.1"
   port: 7000
   event_type: "home_control_magic"
+faults:
+  enabled: false
+  enabled_env: "HOME_CONTROL_FAULT_MODE"
+  rules:
+    - match:
+        source: "dify"
+        action_id: "light_off"
+      scenario: "fail_once_then_success"
+      message: "simulated transient failure"
 actions:
   light_on:
     label: "照明をつける"
@@ -189,6 +198,40 @@ curl.exe -X POST http://127.0.0.1:8787/actions/light_on/execute `
 ```
 
 `execution_id` は「Home Assistant に命令を出した」単位の correlation id です。camera-hub の観測やユーザー確認で得たラベルは、後続サービス側で `execution_id + observation_id + label` として結合してください。同じ `request_id` の重複リクエストには、元の `execution_id` が返ります。
+
+## Fault injection
+
+E2E検証用に、Home Assistantへ実リクエストを送らず `execute` の応答を差し替える fault injection を設定できます。既定では完全に無効です。`faults.enabled: true` または `HOME_CONTROL_FAULT_MODE=1` のときだけ有効になります。本番環境では有効化しないでください。
+
+```yaml
+faults:
+  enabled: false
+  enabled_env: "HOME_CONTROL_FAULT_MODE"
+  rules:
+    - match:
+        source: "dify"
+        action_id: "light_off"
+        request_id_regex: "^e2e-light-off"
+      scenario: "fail_once_then_success"
+      message: "simulated transient failure"
+```
+
+`match` は `action_id`、`source`、`request_id`、`request_id_prefix`、`request_id_suffix`、`request_id_regex`、`user_text_contains`、`user_text_regex`、`confirmed` を指定できます。外部workflow固有のIDは扱わず、`request_id` と `execution_id` を correlation id として使います。
+
+利用できる `scenario` は以下です。
+
+- `always_success`
+- `fail_once_then_success`
+- `fail_twice_then_success`
+- `fail_always`
+- `confirmation_required`
+- `timeout_once`
+- `unsupported_action`
+- `duplicate`
+
+`fail_once_then_success`、`fail_twice_then_success`、`timeout_once` は、同じrule・`action_id`・`source`・正規化済み `request_id` ごとにattemptを数えます。`request_id` 末尾の `-attempt-1`、`-try-2`、`-retry-3` のような表現は同じ試行系列として扱います。
+
+faultが発火すると操作ログに `event: "fault_injected"`、`source`、`action_id`、`request_id`、`scenario`、`attempt`、`status` を記録します。API token、confirmation token、ユーザー発話本文は保存しません。`GET /health` では `fault_mode` と `fault_rules_count` を返します。
 
 ## Dify HTTP Request node例
 
