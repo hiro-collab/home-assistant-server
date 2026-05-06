@@ -98,7 +98,7 @@ components:
   schemas:
     HealthResponse:
       type: object
-      required: [ok, status, home_assistant, actions_count]
+      required: [ok, status, home_assistant, actions_count, fault_mode, fault_rules_count]
       properties:
         ok:
           type: boolean
@@ -110,6 +110,12 @@ components:
           additionalProperties: true
         actions_count:
           type: integer
+        fault_mode:
+          type: boolean
+          description: Always false on unauthenticated health responses; fault injection state is not disclosed.
+        fault_rules_count:
+          type: integer
+          description: Always 0 on unauthenticated health responses; configured rule count is not disclosed.
     ActionSummary:
       type: object
       required: [action_id, label, confirm_required, response_text]

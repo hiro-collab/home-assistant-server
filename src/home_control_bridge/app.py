@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from .audit import JsonlAuditLogger
 from .config import ActionConfig, BridgeConfig, ConfigError, action_preview_payload, get_required_secret, load_config
+from .faults import FaultContext, FaultDecision, evaluate_fault
 from .home_assistant import HomeAssistantClient, HomeAssistantError
 from .schemas import ActionRequest, ActionResponse, ActionSummary, HealthResponse
 from .udp_events import UdpEventPhase, UdpEventSender
@@ -44,6 +45,7 @@ def create_app(
     app.state.config_error = config_error
     app.state.confirmation_tokens = {}
     app.state.execution_requests = {}
+    app.state.fault_attempts = {}
     app.state.audit_logger = audit_logger if audit_logger is not None and config else (
         JsonlAuditLogger(config.server.log_path) if config else None
     )
@@ -98,6 +100,8 @@ def create_app(
                 status="config_error",
                 home_assistant={"ok": False, "error": GENERIC_CONFIG_ERROR},
                 actions_count=0,
+                fault_mode=False,
+                fault_rules_count=0,
             )
         if app.state.config_error:
             return HealthResponse(
@@ -105,6 +109,8 @@ def create_app(
                 status="config_error",
                 home_assistant={"ok": False, "error": GENERIC_CONFIG_ERROR},
                 actions_count=len(app.state.config.actions),
+                fault_mode=False,
+                fault_rules_count=0,
             )
         ha_status = await app.state.ha_client.check_connection()
         ok = bool(ha_status.get("ok"))
@@ -113,6 +119,8 @@ def create_app(
             status="ok" if ok else "degraded",
             home_assistant=ha_status,
             actions_count=len(app.state.config.actions),
+            fault_mode=False,
+            fault_rules_count=0,
         )
 
     @app.get("/actions", response_model=list[ActionSummary], dependencies=[Depends(require_auth)])
@@ -175,6 +183,9 @@ def create_app(
     async def execute_action(action_id: str, body: ActionRequest | None = None) -> ActionResponse:
         body = body or ActionRequest()
         config = require_config()
+        unsupported_fault = _evaluate_fault(app, config, action_id, body, scenarios={"unsupported_action"})
+        if unsupported_fault is not None:
+            return _fault_response(app, action_id, None, body, None, unsupported_fault)
         action = _get_action(config, action_id)
         preview = action_preview_payload(action_id, action)
 
@@ -272,6 +283,10 @@ def create_app(
                 preview=preview,
                 **_response_tracking_fields(action),
             )
+
+        fault = _evaluate_fault(app, config, action_id, body)
+        if fault is not None:
+            return _fault_response(app, action_id, action, body, preview, fault)
 
         execution_id = str(uuid4())
         issued_at = _utc_now_iso()
@@ -457,6 +472,279 @@ def _request_audit_fields(body: ActionRequest) -> dict[str, object]:
     return fields
 
 
+def _evaluate_fault(
+    app: FastAPI,
+    config: BridgeConfig,
+    action_id: str,
+    body: ActionRequest,
+    *,
+    scenarios: set | None = None,
+) -> FaultDecision | None:
+    return evaluate_fault(
+        config,
+        app.state.fault_attempts,
+        FaultContext(
+            action_id=action_id,
+            source=body.source,
+            request_id=body.request_id,
+            user_text=body.user_text,
+            confirmed=body.confirmed,
+        ),
+        scenarios=scenarios,
+    )
+
+
+def _fault_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig | None,
+    body: ActionRequest,
+    preview: dict[str, object] | None,
+    fault: FaultDecision,
+) -> ActionResponse:
+    if fault.outcome == "confirmation_required":
+        return _fault_confirmation_response(app, action_id, action, body, preview, fault)
+    if fault.outcome == "success":
+        return _fault_success_response(app, action_id, action, body, preview, fault)
+    if fault.outcome == "failed":
+        return _fault_failed_response(app, action_id, action, body, preview, fault)
+    if fault.outcome == "duplicate":
+        return _fault_duplicate_response(app, action_id, action, body, preview, fault)
+    if fault.outcome == "unsupported_action":
+        return _fault_unsupported_response(app, action_id, action, body, preview, fault)
+    raise AssertionError(f"Unhandled fault outcome: {fault.outcome}")
+
+
+def _fault_confirmation_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig | None,
+    body: ActionRequest,
+    preview: dict[str, object] | None,
+    fault: FaultDecision,
+) -> ActionResponse:
+    if body.confirmed and _consume_confirmation_token(app, action_id, body.confirmation_token):
+        return _fault_success_response(app, action_id, action, body, preview, fault)
+
+    confirmation_token = _create_confirmation_token(app, action_id)
+    label = action.label if action is not None else action_id
+    message = fault.message or (
+        f"{label}には確認が必要です。実行する場合は confirmed=true と "
+        "confirmation_token を指定してください。"
+    )
+    _audit_fault(
+        app,
+        action_id,
+        action,
+        body,
+        fault,
+        status_value="confirmation_required",
+        executed=False,
+        execution_id=None,
+        issued_at=None,
+    )
+    return ActionResponse(
+        ok=True,
+        action_id=action_id,
+        executed=False,
+        status="confirmation_required",
+        confirmation_required=True,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        confirmation_token=confirmation_token,
+        preview=preview,
+        **_optional_response_tracking_fields(action),
+    )
+
+
+def _fault_success_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig | None,
+    body: ActionRequest,
+    preview: dict[str, object] | None,
+    fault: FaultDecision,
+) -> ActionResponse:
+    execution_id = str(uuid4())
+    issued_at = _utc_now_iso()
+    _register_execution_request(app, action_id, body.request_id, execution_id, issued_at)
+    message = fault.message or (action.response_text if action is not None else "Simulated action submitted.")
+    _audit_fault(
+        app,
+        action_id,
+        action,
+        body,
+        fault,
+        status_value="submitted",
+        executed=True,
+        execution_id=execution_id,
+        issued_at=issued_at,
+    )
+    return ActionResponse(
+        ok=True,
+        action_id=action_id,
+        executed=True,
+        status="submitted",
+        confirmation_required=False,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        execution_id=execution_id,
+        issued_at=issued_at,
+        preview=preview,
+        **_optional_response_tracking_fields(action),
+    )
+
+
+def _fault_failed_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig | None,
+    body: ActionRequest,
+    preview: dict[str, object] | None,
+    fault: FaultDecision,
+) -> ActionResponse:
+    execution_id = str(uuid4())
+    issued_at = _utc_now_iso()
+    _register_execution_request(app, action_id, body.request_id, execution_id, issued_at)
+    message = fault.message or "Home Assistantへの実行要求に失敗しました。"
+    _audit_fault(
+        app,
+        action_id,
+        action,
+        body,
+        fault,
+        status_value="failed",
+        executed=False,
+        execution_id=execution_id,
+        issued_at=issued_at,
+    )
+    return ActionResponse(
+        ok=False,
+        action_id=action_id,
+        executed=False,
+        status="failed",
+        confirmation_required=False,
+        message=message,
+        speak="家電操作に失敗しました。",
+        request_id=body.request_id,
+        execution_id=execution_id,
+        issued_at=issued_at,
+        preview=preview,
+        **_optional_response_tracking_fields(action),
+        error=HOME_ASSISTANT_ERROR_CODE,
+    )
+
+
+def _fault_duplicate_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig | None,
+    body: ActionRequest,
+    preview: dict[str, object] | None,
+    fault: FaultDecision,
+) -> ActionResponse:
+    execution_id = str(uuid4())
+    issued_at = _utc_now_iso()
+    message = fault.message or "同じ request_id の操作はすでに受け付け済みです。"
+    _audit_fault(
+        app,
+        action_id,
+        action,
+        body,
+        fault,
+        status_value="duplicate",
+        executed=False,
+        execution_id=execution_id,
+        issued_at=issued_at,
+    )
+    return ActionResponse(
+        ok=True,
+        action_id=action_id,
+        executed=False,
+        status="duplicate",
+        confirmation_required=False,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        execution_id=execution_id,
+        issued_at=issued_at,
+        preview=preview,
+        **_optional_response_tracking_fields(action),
+    )
+
+
+def _fault_unsupported_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig | None,
+    body: ActionRequest,
+    preview: dict[str, object] | None,
+    fault: FaultDecision,
+) -> ActionResponse:
+    message = fault.message or "Action is not allowlisted."
+    _audit_fault(
+        app,
+        action_id,
+        action,
+        body,
+        fault,
+        status_value="failed",
+        executed=False,
+        execution_id=None,
+        issued_at=None,
+    )
+    return ActionResponse(
+        ok=False,
+        action_id=action_id,
+        executed=False,
+        status="failed",
+        confirmation_required=False,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        preview=preview,
+        **_optional_response_tracking_fields(action),
+        error="unsupported_action",
+    )
+
+
+def _audit_fault(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig | None,
+    body: ActionRequest,
+    fault: FaultDecision,
+    *,
+    status_value: str,
+    executed: bool,
+    execution_id: str | None,
+    issued_at: str | None,
+) -> None:
+    event: dict[str, object] = {
+        "event": "fault_injected",
+        "action_id": action_id,
+        "scenario": fault.scenario,
+        "attempt": fault.attempt,
+        "fault_rule_index": fault.rule_index,
+        "status": status_value,
+        **_request_audit_fields(body),
+        "executed": executed,
+        "confirmed": body.confirmed,
+    }
+    if execution_id is not None:
+        event["execution_id"] = execution_id
+    if issued_at is not None:
+        event["issued_at"] = issued_at
+    if action is not None:
+        event["ha_script"] = action.ha_script
+        event.update(_expected_effect_audit_fields(action))
+    if fault.message is not None:
+        event["fault_message"] = fault.message
+    _audit(app, event)
+
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -481,6 +769,12 @@ def _response_tracking_fields(action: ActionConfig) -> dict[str, object]:
         }
     )
     return fields
+
+
+def _optional_response_tracking_fields(action: ActionConfig | None) -> dict[str, object]:
+    if action is None:
+        return {}
+    return _response_tracking_fields(action)
 
 
 def _expected_effect_audit_fields(action: ActionConfig) -> dict[str, object]:

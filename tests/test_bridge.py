@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from home_control_bridge.app import create_app
 from home_control_bridge.audit import JsonlAuditLogger
 from home_control_bridge.config import BridgeConfig, ConfigError, get_required_secret
+from home_control_bridge.faults import FaultContext, MAX_FAULT_ATTEMPT_STATE, evaluate_fault
 
 
 class FakeUdpEventSender:
@@ -81,7 +82,14 @@ def config(tmp_path):
 def token(monkeypatch):
     value = "local-test-token-with-at-least-32-characters"
     monkeypatch.setenv("HOME_CONTROL_API_TOKEN", value)
+    monkeypatch.delenv("HOME_CONTROL_FAULT_MODE", raising=False)
     return value
+
+
+@pytest.fixture
+def fault_mode(monkeypatch, token):
+    del token
+    monkeypatch.setenv("HOME_CONTROL_FAULT_MODE", "1")
 
 
 def make_client(config, token, tmp_path, ha=None, udp=None):
@@ -100,6 +108,19 @@ def assert_uuid(value: str) -> None:
     assert str(UUID(value)) == value
 
 
+def config_with_faults(config, rules, *, enabled: bool = True):
+    raw = config.model_dump(mode="json")
+    raw["faults"] = {
+        "enabled": enabled,
+        "rules": rules,
+    }
+    return BridgeConfig.model_validate(raw)
+
+
+def read_logs(log_path):
+    return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+
+
 def test_health_is_available_without_bridge_token(config, token, tmp_path):
     client, _, _, _ = make_client(config, token, tmp_path)
 
@@ -108,6 +129,8 @@ def test_health_is_available_without_bridge_token(config, token, tmp_path):
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert response.json()["actions_count"] == 2
+    assert response.json()["fault_mode"] is False
+    assert response.json()["fault_rules_count"] == 0
 
 
 def test_actions_require_api_token(config, token, tmp_path):
@@ -431,6 +454,312 @@ def test_confirm_preview_issues_one_time_confirmation_token(config, token, tmp_p
     assert response.json()["executed"] is False
     assert response.json()["confirmation_required"] is True
     assert isinstance(response.json()["confirmation_token"], str)
+
+
+def test_fault_mode_off_ignores_configured_faults(config, token, tmp_path):
+    fault_config = config_with_faults(
+        config,
+        [
+            {
+                "match": {"action_id": "light_on"},
+                "scenario": "fail_always",
+                "message": "simulated failure",
+            }
+        ],
+        enabled=False,
+    )
+    client, ha, log_path, _ = make_client(fault_config, token, tmp_path)
+
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-fault-off"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["status"] == "submitted"
+    assert ha.calls == ["script.demo_light_on"]
+    assert all(log["event"] != "fault_injected" for log in read_logs(log_path))
+
+
+def test_fault_mode_requires_config_and_env(config, token, tmp_path, monkeypatch):
+    fault_config = config_with_faults(
+        config,
+        [{"match": {"source": "dify", "action_id": "light_on"}, "scenario": "always_success"}],
+        enabled=False,
+    )
+    monkeypatch.setenv("HOME_CONTROL_FAULT_MODE", "1")
+    client, ha, _, _ = make_client(fault_config, token, tmp_path)
+
+    health = client.get("/health")
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-fault-env"},
+    )
+
+    assert health.status_code == 200
+    assert health.json()["fault_mode"] is False
+    assert health.json()["fault_rules_count"] == 0
+    assert response.status_code == 200
+    assert response.json()["status"] == "submitted"
+    assert ha.calls == ["script.demo_light_on"]
+
+
+def test_fault_always_success_returns_submitted_without_home_assistant(config, token, fault_mode, tmp_path):
+    del fault_mode
+    fault_config = config_with_faults(
+        config,
+        [{"match": {"source": "dify", "action_id": "light_on"}, "scenario": "always_success"}],
+    )
+    client, ha, log_path, _ = make_client(fault_config, token, tmp_path)
+
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-fault-success"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["executed"] is True
+    assert body["status"] == "submitted"
+    assert_uuid(body["execution_id"])
+    assert body["expected_state"] == "on"
+    assert ha.calls == []
+    logs = read_logs(log_path)
+    assert logs[0]["event"] == "fault_injected"
+    assert logs[0]["scenario"] == "always_success"
+    assert logs[0]["attempt"] == 1
+    assert logs[0]["source"] == "dify"
+    assert logs[0]["action_id"] == "light_on"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_statuses"),
+    [
+        ("fail_once_then_success", ["failed", "submitted"]),
+        ("fail_twice_then_success", ["failed", "failed", "submitted"]),
+        ("timeout_once", ["failed", "submitted"]),
+    ],
+)
+@pytest.mark.parametrize("attempt_suffix", ["attempt", "hca"])
+def test_fault_transient_scenarios_track_attempts_by_normalized_request_id(
+    config,
+    token,
+    fault_mode,
+    tmp_path,
+    scenario,
+    expected_statuses,
+    attempt_suffix,
+):
+    del fault_mode
+    fault_config = config_with_faults(
+        config,
+        [
+            {
+                "match": {
+                    "action_id": "light_on",
+                    "request_id_regex": "^workflow-1",
+                },
+                "scenario": scenario,
+                "message": "simulated transient failure",
+            }
+        ],
+    )
+    client, ha, log_path, _ = make_client(fault_config, token, tmp_path)
+
+    responses = [
+        client.post(
+            "/actions/light_on/execute",
+            headers=auth_headers(token),
+            json={"source": "dify", "request_id": f"workflow-1-{attempt_suffix}-{index}"},
+        )
+        for index in range(1, len(expected_statuses) + 1)
+    ]
+
+    assert [response.status_code for response in responses] == [200] * len(expected_statuses)
+    assert [response.json()["status"] for response in responses] == expected_statuses
+    assert [response.json()["ok"] for response in responses] == [
+        status == "submitted" for status in expected_statuses
+    ]
+    assert ha.calls == []
+    assert [log["attempt"] for log in read_logs(log_path)] == list(range(1, len(expected_statuses) + 1))
+
+
+def test_fault_fail_always_returns_failed_without_home_assistant(config, token, fault_mode, tmp_path):
+    del fault_mode
+    fault_config = config_with_faults(
+        config,
+        [{"match": {"action_id": "light_on", "user_text_contains": "照明"}, "scenario": "fail_always"}],
+    )
+    client, ha, log_path, _ = make_client(fault_config, token, tmp_path)
+
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-fail-always", "user_text": "照明をつけて"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["status"] == "failed"
+    assert response.json()["error"] == "home_assistant_request_failed"
+    assert ha.calls == []
+    assert read_logs(log_path)[0]["scenario"] == "fail_always"
+
+
+def test_fault_confirmation_required_uses_one_time_token(config, token, fault_mode, tmp_path):
+    del fault_mode
+    fault_config = config_with_faults(
+        config,
+        [{"match": {"action_id": "light_on"}, "scenario": "confirmation_required"}],
+    )
+    client, ha, log_path, _ = make_client(fault_config, token, tmp_path)
+
+    first = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-fault-confirm-1"},
+    )
+    second = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-fault-confirm-2", "confirmed": True},
+    )
+    third = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={
+            "source": "dify",
+            "request_id": "req-fault-confirm-3",
+            "confirmed": True,
+            "confirmation_token": first.json()["confirmation_token"],
+        },
+    )
+
+    assert first.status_code == 200
+    assert first.json()["status"] == "confirmation_required"
+    assert isinstance(first.json()["confirmation_token"], str)
+    assert second.status_code == 200
+    assert second.json()["status"] == "confirmation_required"
+    assert third.status_code == 200
+    assert third.json()["status"] == "submitted"
+    assert_uuid(third.json()["execution_id"])
+    assert ha.calls == []
+    assert [log["status"] for log in read_logs(log_path)] == [
+        "confirmation_required",
+        "confirmation_required",
+        "submitted",
+    ]
+
+
+def test_fault_unsupported_action_can_simulate_unallowlisted_response(config, token, fault_mode, tmp_path):
+    del fault_mode
+    fault_config = config_with_faults(
+        config,
+        [
+            {
+                "match": {"action_id": "unknown_action", "source": "dify"},
+                "scenario": "unsupported_action",
+            }
+        ],
+    )
+    client, ha, log_path, _ = make_client(fault_config, token, tmp_path)
+
+    response = client.post(
+        "/actions/unknown_action/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-unsupported"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["status"] == "failed"
+    assert response.json()["error"] == "unsupported_action"
+    assert ha.calls == []
+    assert read_logs(log_path)[0]["scenario"] == "unsupported_action"
+
+
+def test_fault_duplicate_scenario_does_not_break_existing_duplicate_tracking(config, token, fault_mode, tmp_path):
+    del fault_mode
+    fault_config = config_with_faults(
+        config,
+        [
+            {
+                "match": {"action_id": "light_on", "request_id_suffix": "-sim-dup"},
+                "scenario": "duplicate",
+            }
+        ],
+    )
+    client, ha, log_path, _ = make_client(fault_config, token, tmp_path)
+
+    simulated = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-sim-dup"},
+    )
+    first_real = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-real-dup"},
+    )
+    second_real = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-real-dup"},
+    )
+
+    assert simulated.status_code == 200
+    assert simulated.json()["status"] == "duplicate"
+    assert first_real.status_code == 200
+    assert first_real.json()["status"] == "submitted"
+    assert second_real.status_code == 200
+    assert second_real.json()["status"] == "duplicate"
+    assert second_real.json()["execution_id"] == first_real.json()["execution_id"]
+    assert ha.calls == ["script.demo_light_on"]
+    logs = read_logs(log_path)
+    assert logs[0]["event"] == "fault_injected"
+    assert any(log["event"] == "execute_duplicate_request" for log in logs)
+
+
+def test_fault_attempt_state_is_bounded(config, fault_mode):
+    del fault_mode
+    fault_config = config_with_faults(
+        config,
+        [{"match": {"action_id": "light_on"}, "scenario": "fail_once_then_success"}],
+    )
+    state = {}
+
+    for index in range(MAX_FAULT_ATTEMPT_STATE + 20):
+        evaluate_fault(
+            fault_config,
+            state,
+            FaultContext(
+                action_id="light_on",
+                source="dify",
+                request_id=f"req-{index}",
+                user_text=None,
+                confirmed=False,
+            ),
+        )
+
+    assert len(state) <= MAX_FAULT_ATTEMPT_STATE
+
+
+def test_config_rejects_potentially_catastrophic_fault_regex(config):
+    with pytest.raises(ValidationError):
+        config_with_faults(
+            config,
+            [
+                {
+                    "match": {"user_text_regex": "(a+)+$"},
+                    "scenario": "fail_always",
+                }
+            ],
+        )
 
 
 def test_placeholder_bridge_token_is_rejected(monkeypatch):

@@ -64,3 +64,5 @@ class HealthResponse(BaseModel):
     status: Literal["ok", "degraded", "config_error"]
     home_assistant: dict[str, Any]
     actions_count: int
+    fault_mode: bool = False
+    fault_rules_count: int = 0
