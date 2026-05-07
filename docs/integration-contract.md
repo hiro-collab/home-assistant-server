@@ -49,4 +49,4 @@ Home Assistant の long-lived access token はこのブリッジだけが持ち�
 
 ## 演出通知
 
-UDP 通知は TouchDesigner などの演出同期用です。命令の開始、成功、失敗を横流ししますが、家電状態の観測結果や成功判定の正本ではありません。詳しくは [event-notifications.md](event-notifications.md) を参照してください。
+UDP 通知は TouchDesigner などの演出同期用です。命令の開始、成功、失敗を横流ししますが、家電状態の観測結果や成功判定には使いません。詳しくは [event-notifications.md](event-notifications.md) を参照してください。

@@ -4,4 +4,4 @@
 
 ## 2026-05-07 README 退避
 
-- [archive/README-before-pruning-2026-05-07.md](archive/README-before-pruning-2026-05-07.md): 剪定前 README の退避コピー。履歴確認用であり、仕様の正本として参照しないでください。
+- [archive/README-before-pruning-2026-05-07.md](archive/README-before-pruning-2026-05-07.md): 剪定前 README の退避コピー。履歴確認用です。通常の実装判断では読まなくても大丈夫です。

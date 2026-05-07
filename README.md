@@ -35,3 +35,6 @@ uv run uvicorn home_control_bridge.main:app --host 127.0.0.1 --port 8787
 - セキュリティ注意: [docs/security-notes.md](docs/security-notes.md)
 - OpenAPI: [docs/dify-openapi.yaml](docs/dify-openapi.yaml) または起動中の `/openapi.json`
 - Home Assistant script 例: [docs/home-assistant-scripts.example.yaml](docs/home-assistant-scripts.example.yaml)
+- 退避導線: [docs/retired-paths.md](docs/retired-paths.md)
+
+`docs/archive/` は履歴確認用です。通常の実装判断では上記の文書を参照します。
