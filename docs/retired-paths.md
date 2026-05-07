@@ -13,3 +13,4 @@
 - 責務境界: [module-responsibilities.md](module-responsibilities.md)
 - UDP 通知: [event-notifications.md](event-notifications.md)
 - 疑似障害テスト: [fault-injection.md](fault-injection.md)
+- セキュリティ注意: [security-notes.md](security-notes.md)

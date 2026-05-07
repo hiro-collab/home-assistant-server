@@ -1,110 +1,31 @@
-# API 利用例
+# Dify からの呼び出し
 
-この文書は、手動確認と Dify 連携で使う HTTP 呼び出し例です。詳細な schema は [dify-openapi.yaml](dify-openapi.yaml) または FastAPI の `/openapi.json` を参照してください。
+この文書は、Dify HTTP Request node から Home Control Safety Bridge を呼ぶための最小例です。詳細な schema は [dify-openapi.yaml](dify-openapi.yaml) または FastAPI の `/openapi.json` を参照してください。
 
-## 手動確認
+## 共通ヘッダー
 
-起動確認:
+`GET /health` 以外は、Dify からブリッジ用 API token を送ります。
 
-```powershell
-curl.exe http://127.0.0.1:8787/health
+```http
+Authorization: Bearer {{HOME_CONTROL_API_TOKEN}}
+Content-Type: application/json
 ```
 
-許可済み操作の取得:
+## 操作一覧
 
-```powershell
-curl.exe http://127.0.0.1:8787/actions `
-  -H "Authorization: Bearer $env:HOME_CONTROL_API_TOKEN"
-```
-
-実行前の確認。Home Assistant は呼びません。
-
-```powershell
-curl.exe -X POST http://127.0.0.1:8787/actions/light_on/preview `
-  -H "Authorization: Bearer $env:HOME_CONTROL_API_TOKEN" `
-  -H "Content-Type: application/json" `
-  -d '{ "source": "dify", "request_id": "demo-1", "user_text": "照明をつけて" }'
-```
-
-実行。確認不要の操作であれば Home Assistant に script 実行を送ります。
-
-```powershell
-curl.exe -X POST http://127.0.0.1:8787/actions/light_on/execute `
-  -H "Authorization: Bearer $env:HOME_CONTROL_API_TOKEN" `
-  -H "Content-Type: application/json" `
-  -d '{ "source": "dify", "request_id": "demo-2", "user_text": "照明をつけて" }'
-```
-
-## 確認必須操作
-
-確認必須の操作は、最初の `execute` では実行されません。
-
-```powershell
-curl.exe -X POST http://127.0.0.1:8787/actions/curtain_close/execute `
-  -H "Authorization: Bearer $env:HOME_CONTROL_API_TOKEN" `
-  -H "Content-Type: application/json" `
-  -d '{ "source": "dify", "request_id": "demo-3", "user_text": "カーテンを閉めて" }'
-```
-
-レスポンスの確認トークンを、ユーザー確認後の実行リクエストに含めます。
-
-```powershell
-curl.exe -X POST http://127.0.0.1:8787/actions/curtain_close/execute `
-  -H "Authorization: Bearer $env:HOME_CONTROL_API_TOKEN" `
-  -H "Content-Type: application/json" `
-  -d '{ "source": "dify", "request_id": "demo-4", "confirmed": true, "confirmation_token": "<confirmation_token>" }'
-```
-
-## dry-run
-
-dry-run は Home Assistant を呼ばず、実行予定の応答だけを返します。
-
-```powershell
-curl.exe -X POST http://127.0.0.1:8787/actions/light_on/execute `
-  -H "Authorization: Bearer $env:HOME_CONTROL_API_TOKEN" `
-  -H "Content-Type: application/json" `
-  -d '{ "source": "dify", "request_id": "demo-5", "dry_run": true }'
-```
-
-## 重複実行防止
-
-`request_id` が同じ実行リクエストは短時間重複として扱い、Home Assistant への二重送信を避けます。Dify では workflow run ID など、実行ごとに一意な値を入れてください。
-
-## 実行レスポンス
-
-`execute` が実際に Home Assistant へ命令を送るとき、レスポンスには実行ごとの `execution_id`、`issued_at`、`status` が含まれます。`action_id` は allowlist 上の操作名のままです。
-
-```json
-{
-  "ok": true,
-  "action_id": "light_on",
-  "execution_id": "2c9f9f6a-1f4b-43aa-89ef-4e1c7c73f9d2",
-  "executed": true,
-  "status": "submitted",
-  "issued_at": "2026-05-06T03:20:15.123456+00:00",
-  "domain": "light",
-  "service": "turn_on",
-  "entity_id": "light.demo_room",
-  "expected_state": "on",
-  "message": "照明をつけました。",
-  "speak": "照明をつけました。",
-  "request_id": "demo-2"
-}
-```
-
-## Dify HTTP Request node
-
-一覧取得:
+許可済みの操作だけを取得します。Dify 側はこの結果に含まれる `action_id` だけを後続 node に渡します。
 
 - Method: `GET`
 - URL: `http://127.0.0.1:8787/actions`
 - Headers: `Authorization: Bearer {{HOME_CONTROL_API_TOKEN}}`
 
-プレビュー:
+## プレビュー
+
+実行前に、ユーザーへ返す文言、確認要否、期待メタデータを確認します。Home Assistant は呼びません。
 
 - Method: `POST`
 - URL: `http://127.0.0.1:8787/actions/{{action_id}}/preview`
-- Headers: `Authorization: Bearer {{HOME_CONTROL_API_TOKEN}}`, `Content-Type: application/json`
+- Headers: 共通ヘッダー
 - Body:
 
 ```json
@@ -115,11 +36,13 @@ curl.exe -X POST http://127.0.0.1:8787/actions/light_on/execute `
 }
 ```
 
-実行:
+## 実行
+
+確認不要の操作であれば、Home Assistant へ script 実行を送ります。
 
 - Method: `POST`
 - URL: `http://127.0.0.1:8787/actions/{{action_id}}/execute`
-- Headers: `Authorization: Bearer {{HOME_CONTROL_API_TOKEN}}`, `Content-Type: application/json`
+- Headers: 共通ヘッダー
 - Body:
 
 ```json
@@ -131,3 +54,12 @@ curl.exe -X POST http://127.0.0.1:8787/actions/light_on/execute `
   "confirmation_token": "{{confirmation_token}}"
 }
 ```
+
+## 分岐で使う応答
+
+- `status: "confirmation_required"`: ユーザー確認を挟み、返ってきた確認トークンを次の `execute` に渡します。
+- `status: "dry_run"`: Home Assistant は呼ばれていません。
+- `status: "duplicate"`: 同じ `request_id` の再送です。二重送信は行われず、元の実行 ID が返ります。
+- `execution_id`: Home Assistant へ命令を出した一回分の追跡 ID です。観測結果やユーザー確認と結合するときに保持します。
+
+`request_id` は Dify の workflow run ID など、実行ごとに一意な値を使います。
