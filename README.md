@@ -55,7 +55,7 @@ uv run uvicorn home_control_bridge.main:app --host 127.0.0.1 --port 8787
 
 レスポンスには `ok`、`action_id`、`executed`、`status`、`message`、`speak` を含めます。実際に Home Assistant へ命令を出した場合は `execution_id` と `issued_at` も返します。`status` は `preview`、`confirmation_required`、`dry_run`、`duplicate`、`submitted`、`failed` のいずれかです。
 
-OpenAPI は [docs/dify-openapi.yaml](docs/dify-openapi.yaml) と FastAPI の `/openapi.json` を参照してください。Home Assistant script の例は [docs/home-assistant-scripts.example.yaml](docs/home-assistant-scripts.example.yaml) にあります。
+OpenAPI は [docs/dify-openapi.yaml](docs/dify-openapi.yaml) と FastAPI の `/openapi.json` を参照してください。手動実行、Dify HTTP Request node、確認必須操作、dry-run、重複実行防止は [docs/api-usage.md](docs/api-usage.md) にあります。
 
 ## 統合時の契約
 
@@ -66,6 +66,8 @@ OpenAPI は [docs/dify-openapi.yaml](docs/dify-openapi.yaml) と FastAPI の `/o
 - `execution_id` は「Home Assistant へ命令を出した」単位の correlation id として扱う。観測結果やユーザー確認ラベルは、後続サービス側で `execution_id` と結合する。
 - UDP イベントは任意の演出連携です。実送信が起きた `execute` でのみ `start` / `done` / `error` を送ります。`preview`、`dry_run`、確認待ちでは送らず、UDP 失敗は家電操作を止めません。
 
+詳しい責務境界は [docs/module-responsibilities.md](docs/module-responsibilities.md)、外部サービスとの接続契約は [docs/integration-contract.md](docs/integration-contract.md)、UDP 通知は [docs/event-notifications.md](docs/event-notifications.md)、疑似障害テストは [docs/fault-injection.md](docs/fault-injection.md) を参照してください。
+
 ## セキュリティ注意
 
 - 既定は `127.0.0.1:8787` で起動する。別マシンから呼ぶ場合だけ `0.0.0.0` を検討し、ルーター越しに公開しない。
@@ -74,6 +76,6 @@ OpenAPI は [docs/dify-openapi.yaml](docs/dify-openapi.yaml) と FastAPI の `/o
 - 操作ログは既定で `.cache/home_control/events.jsonl` に保存する。API token、Authorization、password、secret、ユーザー発話本文は保存しない。
 - fault injection はローカル検証専用です。`faults.enabled: true` と `HOME_CONTROL_FAULT_MODE=1` の両方が揃った場合だけ有効になり、本番環境では使わない。
 
-## 通常導線外
+## 関連文書
 
-剪定前の長い README は [docs/archive/README-before-pruning-2026-05-07.md](docs/archive/README-before-pruning-2026-05-07.md) に退避しました。curl 例、Dify ノード例、fault injection の詳細、UDP payload サンプルの扱いは [docs/retired-paths.md](docs/retired-paths.md) を参照してください。archive は履歴確認用であり、統合仕様の正本ではありません。
+Home Assistant script の例は [docs/home-assistant-scripts.example.yaml](docs/home-assistant-scripts.example.yaml) にあります。剪定前の長い README は [docs/archive/README-before-pruning-2026-05-07.md](docs/archive/README-before-pruning-2026-05-07.md) に退避しました。archive は履歴確認用であり、統合仕様の正本ではありません。
