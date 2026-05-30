@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+from hashlib import sha256
 from datetime import UTC, datetime
 from time import monotonic
 from typing import Annotated
@@ -20,6 +21,7 @@ CONFIRMATION_TOKEN_TTL_SECONDS = 120
 EXECUTION_REQUEST_TTL_SECONDS = 600
 GENERIC_CONFIG_ERROR = "Bridge configuration is unavailable."
 HOME_ASSISTANT_ERROR_CODE = "home_assistant_request_failed"
+DRY_RUN_CONFLICT_ERROR_CODE = "dry_run_request_conflict"
 
 
 def create_app(
@@ -45,6 +47,7 @@ def create_app(
     app.state.config_error = config_error
     app.state.confirmation_tokens = {}
     app.state.execution_requests = {}
+    app.state.dry_run_requests = {}
     app.state.fault_attempts = {}
     app.state.audit_logger = audit_logger if audit_logger is not None and config else (
         JsonlAuditLogger(config.server.log_path) if config else None
@@ -189,6 +192,14 @@ def create_app(
         action = _get_action(config, action_id)
         preview = action_preview_payload(action_id, action)
 
+        dry_run_record = _get_dry_run_request(app, body.request_id)
+        if body.dry_run and dry_run_record is not None:
+            if dry_run_record["fingerprint"] == _dry_run_fingerprint(action_id, body):
+                return _dry_run_duplicate_response(app, action_id, action, body, preview)
+            return _dry_run_conflict_response(app, action_id, action, body, preview)
+        if not body.dry_run and dry_run_record is not None:
+            return _dry_run_conflict_response(app, action_id, action, body, preview)
+
         if action.confirm_required and not (
             body.confirmed and _consume_confirmation_token(app, action_id, body.confirmation_token)
         ):
@@ -225,6 +236,7 @@ def create_app(
 
         if body.dry_run:
             message = f"dry-run: {action.label}を実行予定です。"
+            _register_dry_run_request(app, action_id, body)
             _audit(
                 app,
                 {
@@ -454,6 +466,50 @@ def _prune_execution_requests(app: FastAPI) -> None:
             app.state.execution_requests.pop(key, None)
 
 
+def _get_dry_run_request(app: FastAPI, request_id: str | None) -> dict[str, object] | None:
+    _prune_dry_run_requests(app)
+    if not request_id:
+        return None
+    record = app.state.dry_run_requests.get(request_id)
+    if record is None:
+        return None
+    return {"fingerprint": record["fingerprint"]}
+
+
+def _register_dry_run_request(app: FastAPI, action_id: str, body: ActionRequest) -> None:
+    _prune_dry_run_requests(app)
+    if not body.request_id:
+        return
+    app.state.dry_run_requests[body.request_id] = {
+        "expires_at": monotonic() + EXECUTION_REQUEST_TTL_SECONDS,
+        "fingerprint": _dry_run_fingerprint(action_id, body),
+    }
+
+
+def _prune_dry_run_requests(app: FastAPI) -> None:
+    now = monotonic()
+    for key, record in list(app.state.dry_run_requests.items()):
+        expires_at = record["expires_at"]
+        if expires_at < now:
+            app.state.dry_run_requests.pop(key, None)
+
+
+def _dry_run_fingerprint(action_id: str, body: ActionRequest) -> dict[str, object]:
+    user_text_hash = None
+    if body.user_text is not None:
+        user_text_hash = sha256(body.user_text.encode("utf-8")).hexdigest()
+    return {
+        "action_id": action_id,
+        "source": body.source,
+        "dry_run": body.dry_run,
+        "confirmed": body.confirmed,
+        "confirmation_token_present": body.confirmation_token is not None,
+        "user_text_present": body.user_text is not None,
+        "user_text_length": len(body.user_text) if body.user_text is not None else None,
+        "user_text_sha256": user_text_hash,
+    }
+
+
 def _get_action(config: BridgeConfig, action_id: str):
     action = config.actions.get(action_id)
     if action is None:
@@ -513,6 +569,78 @@ def _fault_response(
     if fault.outcome == "unsupported_action":
         return _fault_unsupported_response(app, action_id, action, body, preview, fault)
     raise AssertionError(f"Unhandled fault outcome: {fault.outcome}")
+
+
+def _dry_run_duplicate_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig,
+    body: ActionRequest,
+    preview: dict[str, object],
+) -> ActionResponse:
+    message = "同じ request_id の dry-run はすでに受け付け済みです。"
+    _audit(
+        app,
+        {
+            "event": "execute_dry_run_duplicate",
+            "action_id": action_id,
+            "status": "duplicate",
+            **_request_audit_fields(body),
+            "executed": False,
+            "confirm_required": action.confirm_required,
+            "confirmed": body.confirmed,
+            "ha_script": action.ha_script,
+        },
+    )
+    return ActionResponse(
+        ok=True,
+        action_id=action_id,
+        executed=False,
+        status="duplicate",
+        confirmation_required=action.confirm_required,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        preview=preview,
+        **_response_tracking_fields(action),
+    )
+
+
+def _dry_run_conflict_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig,
+    body: ActionRequest,
+    preview: dict[str, object],
+) -> ActionResponse:
+    message = "同じ request_id の dry-run と異なる操作要求は受け付けられません。"
+    _audit(
+        app,
+        {
+            "event": "execute_dry_run_conflict",
+            "action_id": action_id,
+            "status": "failed",
+            "error": DRY_RUN_CONFLICT_ERROR_CODE,
+            **_request_audit_fields(body),
+            "executed": False,
+            "confirm_required": action.confirm_required,
+            "confirmed": body.confirmed,
+            "ha_script": action.ha_script,
+        },
+    )
+    return ActionResponse(
+        ok=False,
+        action_id=action_id,
+        executed=False,
+        status="failed",
+        confirmation_required=action.confirm_required,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        preview=preview,
+        **_response_tracking_fields(action),
+        error=DRY_RUN_CONFLICT_ERROR_CODE,
+    )
 
 
 def _fault_confirmation_response(

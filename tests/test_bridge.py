@@ -270,6 +270,118 @@ def test_dry_run_does_not_call_home_assistant(config, token, tmp_path):
     assert ha.calls == []
 
 
+def test_repeated_dry_run_request_id_is_classified_without_execution(config, token, tmp_path):
+    client, ha, log_path, _ = make_client(config, token, tmp_path)
+    payload = {"source": "dify", "request_id": "req-dry-dup", "dry_run": True}
+
+    first = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+    second = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+
+    assert first.status_code == 200
+    assert first.json()["status"] == "dry_run"
+    assert second.status_code == 200
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["executed"] is False
+    assert second.json()["execution_id"] is None
+    assert ha.calls == []
+    logs = read_logs(log_path)
+    assert [log["event"] for log in logs] == ["execute_dry_run", "execute_dry_run_duplicate"]
+
+
+def test_conflicting_dry_run_request_id_is_rejected_without_execution(config, token, tmp_path):
+    client, ha, log_path, _ = make_client(config, token, tmp_path)
+
+    first = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-dry-conflict", "dry_run": True},
+    )
+    second = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={
+            "source": "different-client",
+            "request_id": "req-dry-conflict",
+            "dry_run": True,
+            "user_text": "照明をつけて",
+        },
+    )
+
+    assert first.status_code == 200
+    assert first.json()["status"] == "dry_run"
+    assert second.status_code == 200
+    assert second.json()["ok"] is False
+    assert second.json()["status"] == "failed"
+    assert second.json()["error"] == "dry_run_request_conflict"
+    assert ha.calls == []
+    logs = read_logs(log_path)
+    assert logs[-1]["event"] == "execute_dry_run_conflict"
+    assert logs[-1]["error"] == "dry_run_request_conflict"
+    assert "照明をつけて" not in json.dumps(logs[-1], ensure_ascii=False)
+
+
+def test_dry_run_request_id_cannot_be_reused_for_real_execution(config, token, tmp_path):
+    client, ha, log_path, _ = make_client(config, token, tmp_path)
+
+    first = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-dry-then-real", "dry_run": True},
+    )
+    second = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-dry-then-real"},
+    )
+
+    assert first.status_code == 200
+    assert first.json()["status"] == "dry_run"
+    assert second.status_code == 200
+    assert second.json()["status"] == "failed"
+    assert second.json()["error"] == "dry_run_request_conflict"
+    assert ha.calls == []
+    assert [log["event"] for log in read_logs(log_path)] == [
+        "execute_dry_run",
+        "execute_dry_run_conflict",
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"source": "dify", "dry_run": True},
+        {"source": "dify", "request_id": "", "dry_run": True},
+        {"source": "dify", "request_id": "req-dry-\n\t-雪", "dry_run": True},
+    ],
+)
+def test_dry_run_missing_empty_and_unusual_request_ids_do_not_execute(config, token, tmp_path, payload):
+    client, ha, _, _ = make_client(config, token, tmp_path)
+
+    response = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "dry_run"
+    assert response.json()["executed"] is False
+    assert ha.calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"source": "dify", "request_id": "x" * 161, "dry_run": True},
+        {"source": "dify", "request_id": "req-dry-bad", "dry_run": {"nested": True}},
+        {"source": "dify", "request_id": "req-dry-extra", "dry_run": True, "ha_script": "script.any"},
+    ],
+)
+def test_malformed_dry_run_bodies_are_rejected_before_execution(config, token, tmp_path, payload):
+    client, ha, _, _ = make_client(config, token, tmp_path)
+
+    response = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+
+    assert response.status_code == 422
+    assert ha.calls == []
+
+
 def test_confirmation_required_action_is_blocked_until_confirmed(config, token, tmp_path):
     client, ha, _, _ = make_client(config, token, tmp_path)
 
