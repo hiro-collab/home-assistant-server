@@ -31,6 +31,18 @@ Home Assistant 側では、`config/home-control.yaml` に書いた script / enti
 
 ## 通常起動
 
+Sword Agent OS の標準ディストリビューションから単独で起動する場合は、repo root で
+次の helper を使うと、生成済みの organ `.env` を bridge process に渡せます。
+secret 値は表示しません。
+
+```powershell
+pwsh -NoProfile -File .\scripts\start-home-control-bridge.ps1
+```
+
+この organ ディレクトリだけで起動する場合も、`.env` の存在だけでは process 環境に
+値は入りません。直接起動では、必ず `$env:` を設定するか、`uv run --env-file .env`
+を使ってください。
+
 ```powershell
 $env:HOME_CONTROL_CONFIG = "config/home-control.yaml"
 $env:HOME_CONTROL_API_TOKEN = (python -c "import secrets; print(secrets.token_urlsafe(32))")
@@ -41,8 +53,12 @@ uv run home-control-bridge
 直接 uvicorn で起動する場合:
 
 ```powershell
-uv run uvicorn home_control_bridge.main:app --host 127.0.0.1 --port 8787
+uv run --env-file .env python -m uvicorn home_control_bridge.main:app --host 127.0.0.1 --port 8787
 ```
+
+plain `uv run uvicorn ...` は `.env` を自動では読みません。その場合、client 側が
+`.env` から token を読めても、server 側が `HOME_ASSISTANT_TOKEN` を受け取れず
+`/health` が `config_error`、`/actions` が `503` になることがあります。
 
 ## 文書
 
