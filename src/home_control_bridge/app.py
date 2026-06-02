@@ -14,7 +14,7 @@ from .audit import JsonlAuditLogger
 from .config import ActionConfig, BridgeConfig, ConfigError, action_preview_payload, get_required_secret, load_config
 from .faults import FaultContext, FaultDecision, evaluate_fault
 from .home_assistant import HomeAssistantClient, HomeAssistantError
-from .schemas import ActionRequest, ActionResponse, ActionSummary, HealthResponse
+from .schemas import ActionRequest, ActionResponse, ActionStateResponse, ActionSummary, HealthResponse
 from .udp_events import UdpEventPhase, UdpEventSender
 
 CONFIRMATION_TOKEN_TTL_SECONDS = 120
@@ -139,6 +139,41 @@ def create_app(
             )
             for action_id, action in sorted(config.actions.items())
         ]
+
+    @app.get(
+        "/actions/{action_id}/state",
+        response_model=ActionStateResponse,
+        dependencies=[Depends(require_auth)],
+    )
+    async def get_action_state(action_id: str) -> ActionStateResponse:
+        config = require_config()
+        action = _get_action(config, action_id)
+        if action.expected_effect is None:
+            return ActionStateResponse(
+                ok=False,
+                action_id=action_id,
+                status="untracked",
+            )
+
+        expected_state = action.expected_effect.expected_state
+        try:
+            actual_state = await app.state.ha_client.get_entity_state(action.expected_effect.entity_id)
+        except HomeAssistantError:
+            return ActionStateResponse(
+                ok=False,
+                action_id=action_id,
+                status="unavailable",
+                expected_state=expected_state,
+            )
+
+        status = "matched" if actual_state == expected_state else "mismatch"
+        return ActionStateResponse(
+            ok=status == "matched",
+            action_id=action_id,
+            status=status,
+            expected_state=expected_state,
+            actual_state=actual_state,
+        )
 
     @app.post(
         "/actions/{action_id}/preview",

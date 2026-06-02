@@ -26,9 +26,12 @@ class FakeUdpEventSender:
 
 
 class FakeHomeAssistant:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, fail_state: bool = False, states: dict[str, str] | None = None) -> None:
         self.calls: list[str] = []
+        self.state_calls: list[str] = []
         self.fail = fail
+        self.fail_state = fail_state
+        self.states = states or {"light.demo_room": "on"}
 
     async def check_connection(self):
         return {"ok": True, "status_code": 200}
@@ -40,6 +43,14 @@ class FakeHomeAssistant:
 
             raise HomeAssistantError("boom")
         return {"status_code": 200, "body": [{"entity_id": script_entity_id}]}
+
+    async def get_entity_state(self, entity_id: str):
+        self.state_calls.append(entity_id)
+        if self.fail_state:
+            from home_control_bridge.home_assistant import HomeAssistantError
+
+            raise HomeAssistantError("state unavailable")
+        return self.states.get(entity_id, "unknown")
 
 
 @pytest.fixture
@@ -150,6 +161,78 @@ def test_actions_returns_public_allowlist(config, token, tmp_path):
     actions = response.json()
     assert {action["action_id"] for action in actions} == {"light_on", "curtain_close"}
     assert all("ha_script" not in action for action in actions)
+
+
+def test_action_state_requires_api_token(config, token, tmp_path):
+    client, _, _, _ = make_client(config, token, tmp_path)
+
+    response = client.get("/actions/light_on/state")
+
+    assert response.status_code == 401
+
+
+def test_action_state_returns_redacted_match(config, token, tmp_path):
+    client, ha, _, _ = make_client(config, token, tmp_path)
+
+    response = client.get("/actions/light_on/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "ok": True,
+        "action_id": "light_on",
+        "status": "matched",
+        "expected_state": "on",
+        "actual_state": "on",
+    }
+    assert "entity_id" not in body
+    assert ha.state_calls == ["light.demo_room"]
+
+
+def test_action_state_reports_mismatch_without_entity(config, token, tmp_path):
+    ha = FakeHomeAssistant(states={"light.demo_room": "off"})
+    client, _, _, _ = make_client(config, token, tmp_path, ha=ha)
+
+    response = client.get("/actions/light_on/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["status"] == "mismatch"
+    assert body["expected_state"] == "on"
+    assert body["actual_state"] == "off"
+    assert "entity_id" not in body
+
+
+def test_action_state_untracked_action_does_not_call_home_assistant(config, token, tmp_path):
+    client, ha, _, _ = make_client(config, token, tmp_path)
+
+    response = client.get("/actions/curtain_close/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": False,
+        "action_id": "curtain_close",
+        "status": "untracked",
+        "expected_state": None,
+        "actual_state": None,
+    }
+    assert ha.state_calls == []
+
+
+def test_action_state_unavailable_is_redacted(config, token, tmp_path):
+    client, _, _, _ = make_client(config, token, tmp_path, ha=FakeHomeAssistant(fail_state=True))
+
+    response = client.get("/actions/light_on/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["status"] == "unavailable"
+    assert body["expected_state"] == "on"
+    assert body["actual_state"] is None
+    assert "entity_id" not in body
+    assert "state unavailable" not in json.dumps(body)
 
 
 def test_preview_logs_without_executing(config, token, tmp_path):

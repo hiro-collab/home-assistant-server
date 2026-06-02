@@ -20,6 +20,14 @@ class ActionSummary(BaseModel):
     expected_effect: ExpectedEffect | None = None
 
 
+class ActionStateResponse(BaseModel):
+    ok: bool
+    action_id: str
+    status: Literal["matched", "mismatch", "untracked", "unavailable"]
+    expected_state: str | None = None
+    actual_state: str | None = None
+
+
 class ActionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

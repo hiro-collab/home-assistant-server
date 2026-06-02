@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Home Control Safety Bridge
-  version: 0.1.0
+  version: 0.1.1
   description: >
     Local HTTP bridge for Dify/AITuberKit/sword-voice-agent. It only exposes
     configured action_id values and internally calls Home Assistant
@@ -52,6 +52,22 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ActionResponse"
+        "401":
+          description: Missing or invalid token
+        "404":
+          description: Action is not allowlisted
+  /actions/{action_id}/state:
+    get:
+      summary: Read the Home Assistant state for an action expected effect without exposing entity ids
+      parameters:
+        - $ref: "#/components/parameters/ActionId"
+      responses:
+        "200":
+          description: Redacted state-check result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionStateResponse"
         "401":
           description: Missing or invalid token
         "404":
@@ -151,6 +167,24 @@ components:
           type: string
           nullable: true
           description: One-time token returned by preview/blocked execute for confirm_required actions.
+    ActionStateResponse:
+      type: object
+      required: [ok, action_id, status]
+      properties:
+        ok:
+          type: boolean
+          description: True only when actual_state matches expected_state.
+        action_id:
+          type: string
+        status:
+          type: string
+          enum: [matched, mismatch, untracked, unavailable]
+        expected_state:
+          type: string
+          nullable: true
+        actual_state:
+          type: string
+          nullable: true
     ActionResponse:
       type: object
       required: [ok, action_id, executed, status, confirmation_required, message, speak]

@@ -19,6 +19,16 @@ Content-Type: application/json
 - URL: `http://127.0.0.1:8787/actions`
 - Headers: `Authorization: Bearer {{HOME_CONTROL_API_TOKEN}}`
 
+## 状態確認
+
+`expected_effect` がある action について、Home Assistant の現在 state を読み取り専用で確認します。Home Assistant の URL や entity ID は返しません。
+
+- Method: `GET`
+- URL: `http://127.0.0.1:8787/actions/{{action_id}}/state`
+- Headers: `Authorization: Bearer {{HOME_CONTROL_API_TOKEN}}`
+
+応答は `action_id`、`expected_state`、`actual_state`、`status` だけを見て判定します。`status: "matched"` 以外は、実行 proof ではなく追加確認が必要な状態です。
+
 ## プレビュー
 
 実行前に、ユーザーへ返す文言、確認要否、期待メタデータを確認します。Home Assistant は呼びません。
