@@ -2,15 +2,34 @@
 
 Home Assistant の script allowlist だけを外部クライアントへ公開するローカル HTTP ブリッジです。Dify / AITuberKit / sword-voice-agent などの音声・エージェント層から、家電操作を安全に中継するための単体モジュールとして使います。
 
-## 起動
+## 初期セットアップ
 
 ```powershell
 uv sync --extra dev
-Copy-Item config/home-control.example.yaml config/home-control.yaml
-Copy-Item .env.example .env
+if (-not (Test-Path config/home-control.yaml)) {
+  Copy-Item config/home-control.example.yaml config/home-control.yaml
+}
+if (-not (Test-Path .env)) {
+  Copy-Item .env.example .env
+}
 ```
 
 `config/home-control.yaml` の `home_assistant.base_url` と `actions` を環境に合わせて編集し、実行環境で必要な token を渡します。
+`.env` には実 token を入れるため、コミットしません。
+
+## dotenv / local config
+
+`.env.example` を `.env` にコピーし、少なくとも次を設定します。
+
+- `HOME_CONTROL_CONFIG`: 通常は `config/home-control.yaml`。
+- `HOME_CONTROL_API_TOKEN`: Dify / AITuberKit / Thought Core / Environment State Server がこの bridge へ送る local token。
+- `ENVIRONMENT_API_TOKEN`: Environment State Server 専用 token。空なら `HOME_CONTROL_API_TOKEN` を共有。
+- `HOME_ASSISTANT_TOKEN`: Home Assistant の Long-lived access token。
+
+Home Assistant 側では、`config/home-control.yaml` に書いた script / entity が実在し、Windows PC から
+`home_assistant.base_url` へ到達できる必要があります。
+
+## 通常起動
 
 ```powershell
 $env:HOME_CONTROL_CONFIG = "config/home-control.yaml"
