@@ -16,10 +16,13 @@ from .config import (
     BridgeConfig,
     ConfigError,
     action_control_type,
+    action_expected_states,
     action_preview_payload,
     action_public_expected_effect,
+    action_settle_seconds,
     action_state_authority,
     action_state_tracking_status,
+    action_timeout_seconds,
     action_verification_mode,
     get_required_secret,
     load_config,
@@ -153,6 +156,9 @@ def create_app(
                 state_tracking=action_state_tracking_status(action),
                 verification=action.verification.model_dump() if action.verification is not None else None,
                 expected_effect=_expected_effect_payload(action),
+                expected_states=action_expected_states(action),
+                settle_seconds=action_settle_seconds(action),
+                timeout_seconds=action_timeout_seconds(action),
             )
             for action_id, action in sorted(config.actions.items())
         ]
@@ -176,6 +182,7 @@ def create_app(
             )
 
         expected_state = action.expected_effect.expected_state
+        expected_states = action_expected_states(action)
         try:
             actual_state = await app.state.ha_client.get_entity_state(action.expected_effect.entity_id)
         except HomeAssistantError:
@@ -184,15 +191,17 @@ def create_app(
                 action_id=action_id,
                 status="unavailable",
                 expected_state=expected_state,
+                expected_states=expected_states,
                 **tracking_fields,
             )
 
-        status = "matched" if actual_state == expected_state else "mismatch"
+        status = "matched" if actual_state in expected_states else "mismatch"
         return ActionStateResponse(
             ok=status == "matched",
             action_id=action_id,
             status=status,
             expected_state=expected_state,
+            expected_states=expected_states,
             actual_state=actual_state,
             **tracking_fields,
         )
@@ -949,6 +958,9 @@ def _state_tracking_summary_fields(action: ActionConfig) -> dict[str, str]:
 
 def _response_tracking_fields(action: ActionConfig) -> dict[str, object]:
     fields: dict[str, object] = _state_tracking_summary_fields(action)
+    fields["expected_states"] = action_expected_states(action)
+    fields["settle_seconds"] = action_settle_seconds(action)
+    fields["timeout_seconds"] = action_timeout_seconds(action)
     effect = _expected_effect_payload(action)
     fields["expected_effect"] = effect
     if effect is None:
@@ -972,6 +984,9 @@ def _optional_response_tracking_fields(action: ActionConfig | None) -> dict[str,
 
 def _expected_effect_audit_fields(action: ActionConfig) -> dict[str, object]:
     fields: dict[str, object] = _state_tracking_summary_fields(action)
+    fields["expected_states"] = action_expected_states(action)
+    fields["settle_seconds"] = action_settle_seconds(action)
+    fields["timeout_seconds"] = action_timeout_seconds(action)
     effect = _expected_effect_payload(action)
     if effect is None:
         return fields

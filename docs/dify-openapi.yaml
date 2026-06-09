@@ -166,6 +166,19 @@ components:
         expected_effect:
           $ref: "#/components/schemas/ExpectedEffect"
           nullable: true
+        expected_states:
+          type: array
+          items:
+            type: string
+          description: States that count as HA-state proof for this action. Includes expected_effect.expected_state when tracked.
+        settle_seconds:
+          type: number
+          format: float
+          description: Suggested wait before post-action state read. Metadata only, not proof by itself.
+        timeout_seconds:
+          type: number
+          format: float
+          description: Suggested maximum wait window for ticketed state proof. Metadata only, not proof by itself.
     ActionRequest:
       type: object
       properties:
@@ -192,7 +205,7 @@ components:
       properties:
         ok:
           type: boolean
-          description: True only when actual_state matches expected_state.
+          description: True only when actual_state matches expected_state or one of expected_states.
         action_id:
           type: string
         status:
@@ -213,6 +226,11 @@ components:
         expected_state:
           type: string
           nullable: true
+        expected_states:
+          type: array
+          items:
+            type: string
+          description: States accepted for the HA-state proof check.
         actual_state:
           type: string
           nullable: true
@@ -284,6 +302,19 @@ components:
         expected_effect:
           $ref: "#/components/schemas/ExpectedEffect"
           nullable: true
+        expected_states:
+          type: array
+          items:
+            type: string
+          description: States that count as HA-state proof for this action.
+        settle_seconds:
+          type: number
+          format: float
+          description: Suggested wait before post-action state read. Metadata only, not proof by itself.
+        timeout_seconds:
+          type: number
+          format: float
+          description: Suggested maximum wait window for ticketed state proof. Metadata only, not proof by itself.
         confirmation_token:
           type: string
           nullable: true
@@ -303,6 +334,19 @@ components:
         mode:
           type: string
           enum: [ha_state, external_observation, command_ack_only, manual_confirmation, unsupported]
+        accepted_states:
+          type: array
+          items:
+            type: string
+          description: Additional HA states accepted as proof; expected_effect.expected_state is included separately.
+        settle_seconds:
+          type: number
+          format: float
+          description: Suggested wait before post-action state read.
+        timeout_seconds:
+          type: number
+          format: float
+          description: Suggested maximum wait window for ticketed state proof.
     ExpectedEffect:
       type: object
       required: [domain, service, entity_id, expected_state]

@@ -1,6 +1,6 @@
 [project]
 name = "home-control-bridge"
-version = "0.1.1"
+version = "0.1.2"
 description = "A local safety bridge that exposes allowlisted Home Assistant scripts over HTTP."
 readme = "README.md"
 requires-python = ">=3.11"

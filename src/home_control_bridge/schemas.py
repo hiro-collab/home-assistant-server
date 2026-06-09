@@ -20,6 +20,9 @@ class Verification(BaseModel):
         "manual_confirmation",
         "unsupported",
     ]
+    accepted_states: list[str] = Field(default_factory=list)
+    settle_seconds: float = 0.0
+    timeout_seconds: float = 0.0
 
 
 class ActionSummary(BaseModel):
@@ -61,6 +64,9 @@ class ActionSummary(BaseModel):
     ]
     verification: Verification | None = None
     expected_effect: ExpectedEffect | None = None
+    expected_states: list[str] = Field(default_factory=list)
+    settle_seconds: float = 0.0
+    timeout_seconds: float = 0.0
 
 
 class ActionStateResponse(BaseModel):
@@ -81,6 +87,7 @@ class ActionStateResponse(BaseModel):
     verification_mode: str | None = None
     state_tracking: str | None = None
     expected_state: str | None = None
+    expected_states: list[str] = Field(default_factory=list)
     actual_state: str | None = None
 
 
@@ -122,6 +129,9 @@ class ActionResponse(BaseModel):
     verification_mode: str | None = None
     state_tracking: str | None = None
     expected_effect: ExpectedEffect | None = None
+    expected_states: list[str] = Field(default_factory=list)
+    settle_seconds: float = 0.0
+    timeout_seconds: float = 0.0
     confirmation_token: str | None = None
     preview: dict[str, Any] | None = None
     error: str | None = None

@@ -123,6 +123,23 @@ StateAuthority = Literal[
 
 class VerificationConfig(BaseModel):
     mode: VerificationMode
+    accepted_states: list[str] = Field(default_factory=list, max_length=12)
+    settle_seconds: float = Field(default=0.0, ge=0, le=600)
+    timeout_seconds: float = Field(default=0.0, ge=0, le=1800)
+
+    @field_validator("accepted_states")
+    @classmethod
+    def normalize_accepted_states(cls, value: list[str]) -> list[str]:
+        states: list[str] = []
+        for item in value:
+            state = item.strip()
+            if not state:
+                raise ValueError("accepted_states entries must not be empty")
+            if len(state) > 80:
+                raise ValueError("accepted_states entries must be at most 80 characters")
+            if state not in states:
+                states.append(state)
+        return states
 
 
 FaultScenario = Literal[
@@ -312,6 +329,9 @@ def action_preview_payload(action_id: str, action: ActionConfig) -> dict[str, An
         "state_authority": action_state_authority(action),
         "verification_mode": action_verification_mode(action),
         "state_tracking": action_state_tracking_status(action),
+        "expected_states": action_expected_states(action),
+        "settle_seconds": action_settle_seconds(action),
+        "timeout_seconds": action_timeout_seconds(action),
     }
     effect = action_public_expected_effect(action)
     if effect is not None:
@@ -370,3 +390,29 @@ def action_public_expected_effect(action: ActionConfig) -> dict[str, str] | None
     if action.expected_effect is None:
         return None
     return action.expected_effect.model_dump()
+
+
+def action_expected_states(action: ActionConfig) -> list[str]:
+    if action_state_tracking_status(action) != "tracked":
+        return []
+    if action.expected_effect is None:
+        return []
+
+    states: list[str] = [action.expected_effect.expected_state]
+    if action.verification is not None:
+        for state in action.verification.accepted_states:
+            if state not in states:
+                states.append(state)
+    return states
+
+
+def action_settle_seconds(action: ActionConfig) -> float:
+    if action.verification is None:
+        return 0.0
+    return action.verification.settle_seconds
+
+
+def action_timeout_seconds(action: ActionConfig) -> float:
+    if action.verification is None:
+        return 0.0
+    return action.verification.timeout_seconds

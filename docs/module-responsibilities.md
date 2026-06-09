@@ -45,6 +45,20 @@ Home Assistant の現在 state を読み取り専用で比較します。これ�
 対象 action が HA state tracking 可能かだけを確認します。実行前に `matched` でないことは、
 bridge 起動失敗や action catalog 失敗を意味しません。
 
+For actions with reliable HA state but slower transitions, `verification.accepted_states`
+can list additional acceptable end states, and `settle_seconds` / `timeout_seconds`
+document the wait window for the ticketed execute/wait/post-state procedure. These fields
+are only meaningful with `verification.mode: ha_state` and a real `expected_effect`;
+they must not be used to turn `switch:unknown`, script-wrapper state, or inferred
+shadow state into physical proof.
+
+Use separate proof labels in reports and API clients:
+
+- `command accepted`: bridge/Home Assistant accepted the command; this is not appliance-state proof.
+- `HA state matched`: the post-action or post-restore state matched expected/accepted states.
+- `external observed`: camera, sensor, manual observation, or another independent source confirmed reality.
+- `restored / reversible`: the action and its restore path were both proven at their own layers.
+
 SwitchBot remote-style のライトのように、押すたびに物理状態だけが反転し Home Assistant では
 現在 state が読めない機器は `stateless_toggle` として扱います。その場合、`light_on` /
 `light_off` という名前であっても HA state proof は主張せず、`external_observation` や
@@ -62,8 +76,17 @@ authority is proven:
 | aircon on/off | `switch:unknown` | `stateless_command`, `submitted_only`, `command_ack_only` | `mode_command` only if a reliable climate entity is used |
 | door open/close | `cover:open` observed | `position_command`, `submitted_only`, `command_ack_only` | `ha_state` after execute/wait proof confirms stable open/closed state |
 | door stop | transient cover command | `position_command`, `submitted_only`, `command_ack_only` | External/manual confirmation, not simple HA state proof |
-| vacuum return | `vacuum:docked` observed | `job_command`, `submitted_only`, `command_ack_only` | `ha_state` for `docked` after wait/timeout semantics are defined |
+| vacuum return | `vacuum:docked` observed | `job_command`, `submitted_only`, `command_ack_only` | `ha_state` for `docked` after accepted-state and wait/timeout semantics are proven |
 | vacuum start/pause | job state uncertain | `job_command`, `submitted_only`, `command_ack_only` | Accepted states and settle/timeout windows required first |
+
+Define vacuum start and return criteria independently. Start-side proof must name
+which states count as progress, such as `cleaning`, `returning`, or explicitly
+`not docked`, and why that is acceptable for the ticket. Return-side proof should
+normally require `docked`. Do not broaden `accepted_states` just to make a live
+pilot green.
+If return only reaches `docked` after an extra return command, record the retry
+count and keep the action as `command_ack_only` until a later ticket proves
+single-command return reliability.
 
 Do not add `expected_effect` to `switch:unknown` actions just to make `CheckState`
 green. Script entity state `off` only means the script is not running; it is not

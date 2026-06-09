@@ -202,6 +202,7 @@ def test_action_state_returns_redacted_match(config, token, tmp_path):
         "verification_mode": "ha_state",
         "state_tracking": "tracked",
         "expected_state": "on",
+        "expected_states": ["on"],
         "actual_state": "on",
     }
     assert "entity_id" not in body
@@ -219,8 +220,38 @@ def test_action_state_reports_mismatch_without_entity(config, token, tmp_path):
     assert body["ok"] is False
     assert body["status"] == "mismatch"
     assert body["expected_state"] == "on"
+    assert body["expected_states"] == ["on"]
     assert body["actual_state"] == "off"
     assert "entity_id" not in body
+
+
+def test_action_state_matches_accepted_states(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"]["verification"] = {
+        "mode": "ha_state",
+        "accepted_states": ["opening", "on"],
+        "settle_seconds": 2,
+        "timeout_seconds": 30,
+    }
+    accepted_config = BridgeConfig.model_validate(raw)
+    ha = FakeHomeAssistant(states={"light.demo_room": "opening"})
+    client, _, _, _ = make_client(accepted_config, token, tmp_path, ha=ha)
+
+    response = client.get("/actions/light_on/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["status"] == "matched"
+    assert body["expected_state"] == "on"
+    assert body["expected_states"] == ["on", "opening"]
+    assert body["actual_state"] == "opening"
+
+    actions_response = client.get("/actions", headers=auth_headers(token))
+    action = next(action for action in actions_response.json() if action["action_id"] == "light_on")
+    assert action["expected_states"] == ["on", "opening"]
+    assert action["settle_seconds"] == 2
+    assert action["timeout_seconds"] == 30
 
 
 def test_action_state_ack_only_action_does_not_call_home_assistant(config, token, tmp_path):
@@ -238,6 +269,7 @@ def test_action_state_ack_only_action_does_not_call_home_assistant(config, token
         "verification_mode": "command_ack_only",
         "state_tracking": "ack_only",
         "expected_state": None,
+        "expected_states": [],
         "actual_state": None,
     }
     assert ha.state_calls == []
@@ -271,6 +303,7 @@ def test_external_observation_action_ignores_legacy_expected_effect(config, toke
         "verification_mode": "external_observation",
         "state_tracking": "external_required",
         "expected_state": None,
+        "expected_states": [],
         "actual_state": None,
     }
     assert ha.state_calls == []
@@ -286,6 +319,7 @@ def test_action_state_unavailable_is_redacted(config, token, tmp_path):
     assert body["ok"] is False
     assert body["status"] == "unavailable"
     assert body["expected_state"] == "on"
+    assert body["expected_states"] == ["on"]
     assert body["actual_state"] is None
     assert "entity_id" not in body
     assert "state unavailable" not in json.dumps(body)

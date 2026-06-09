@@ -34,8 +34,11 @@ Content-Type: application/json
 - Headers: `Authorization: Bearer {{HOME_CONTROL_API_TOKEN}}`
 
 応答は `action_id`、`control_type`、`state_authority`、`verification_mode`、`state_tracking`、
-`expected_state`、`actual_state`、`status` を見て判定します。`status: "matched"` 以外は、
-実行 proof ではなく追加確認が必要な状態です。
+`expected_state`、`expected_states`、`actual_state`、`status` を見て判定します。
+`expected_states` は、cover / vacuum / climate などで複数の完了 state を許容する時の
+読み取り専用 proof 条件です。`status: "matched"` 以外は、実行 proof ではなく追加確認が必要な状態です。
+catalog / preview には `settle_seconds` と `timeout_seconds` も出ますが、これは実行後に
+どれだけ待ってから state を読むかのメタデータであり、それ単体では proof ではありません。
 
 ## プレビュー
 
@@ -57,6 +60,8 @@ Content-Type: application/json
 ## 実行
 
 確認不要の操作であれば、Home Assistant へ script 実行を送ります。
+確認必須 action の `confirmation_token` は一度だけ使えます。dry-run の確認に
+使った token は消費済みなので、本実行では直前に preview を取り直し、新しい token を使います。
 
 - Method: `POST`
 - URL: `http://127.0.0.1:8787/actions/{{action_id}}/execute`

@@ -42,6 +42,8 @@ Home Assistant の long-lived access token はこのブリッジだけが持ち�
 危険度や生活影響が高い操作は、設定で確認必須にします。最初の `execute` は Home Assistant を呼ばず、確認が必要であることと確認用の一時トークンを返します。
 
 ユーザー確認後、クライアントは `confirmed: true` と `confirmation_token` を付けて同じ action を再実行します。確認トークンは短時間で失効し、一度だけ使えます。
+確認必須 action で dry-run まで確認する場合、dry-run に使った token は消費済みです。
+実際に Home Assistant へ送る直前に preview を取り直し、新しい token を本実行だけに使います。
 
 ## dry-run
 

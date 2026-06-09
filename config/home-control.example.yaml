@@ -41,6 +41,9 @@ actions:
     state_authority: "ha_entity"
     verification:
       mode: "ha_state"
+      accepted_states: ["on"]
+      settle_seconds: 1
+      timeout_seconds: 10
     expected_effect:
       domain: "light"
       service: "turn_on"
@@ -56,6 +59,9 @@ actions:
     state_authority: "ha_entity"
     verification:
       mode: "ha_state"
+      accepted_states: ["off"]
+      settle_seconds: 1
+      timeout_seconds: 10
     expected_effect:
       domain: "light"
       service: "turn_off"
@@ -71,6 +77,21 @@ actions:
     state_authority: "submitted_only"
     verification:
       mode: "command_ack_only"
+
+    # If a later read-only review and ticketed execute/wait proof show this
+    # cover entity reports stable closed/open states, switch to:
+    #
+    # state_authority: "ha_entity"
+    # verification:
+    #   mode: "ha_state"
+    #   accepted_states: ["closed"]
+    #   settle_seconds: 8
+    #   timeout_seconds: 60
+    # expected_effect:
+    #   domain: "cover"
+    #   service: "close_cover"
+    #   entity_id: "cover.demo_curtain"
+    #   expected_state: "closed"
 
   projection_mode:
     label: "プロジェクションモードにする"
