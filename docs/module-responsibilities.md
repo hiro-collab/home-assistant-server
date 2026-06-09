@@ -73,10 +73,10 @@ authority is proven:
 | --- | --- | --- | --- |
 | light on/off | `switch:unknown` | `stateless_toggle`, `open_loop`, `external_observation` | External sensor/camera/manual proof only |
 | fan on/off | `switch:unknown` | `stateless_command`, `submitted_only`, `command_ack_only` | External observation if needed |
-| aircon on/off | `switch:unknown` | `stateless_command`, `submitted_only`, `command_ack_only` | `mode_command` only if a reliable climate entity is used |
+| aircon on/off | `switch:unknown`; a same-device `climate` candidate exists | `stateless_command`, `submitted_only`, `command_ack_only` | `mode_command` only after the climate service path is designed and proven |
 | door open/close | `cover:open` observed | `position_command`, `submitted_only`, `command_ack_only` | `ha_state` after execute/wait proof confirms stable open/closed state |
 | door stop | transient cover command | `position_command`, `submitted_only`, `command_ack_only` | External/manual confirmation, not simple HA state proof |
-| vacuum return | `vacuum:docked` observed | `job_command`, `submitted_only`, `command_ack_only` | `ha_state` for `docked` after accepted-state and wait/timeout semantics are proven |
+| vacuum return | target cloud-side vacuum entity `docked`; separate local vacuum entity also exists | `job_command`, target-specific `ha_entity`, `ha_state` after local config promotion | Check only the script target; report retry if the first wait does not reach `docked` |
 | vacuum start/pause | job state uncertain | `job_command`, `submitted_only`, `command_ack_only` | Accepted states and settle/timeout windows required first |
 
 Define vacuum start and return criteria independently. Start-side proof must name
@@ -85,8 +85,17 @@ which states count as progress, such as `cleaning`, `returning`, or explicitly
 normally require `docked`. Do not broaden `accepted_states` just to make a live
 pilot green.
 If return only reaches `docked` after an extra return command, record the retry
-count and keep the action as `command_ack_only` until a later ticket proves
-single-command return reliability.
+count. Tracking metadata can still make the post-state check explicit, but it
+does not prove single-command return reliability.
+The 2026-06-09 live pilot also showed why proof must be target-specific: the HA
+setup exposed more than one `vacuum` entity, while the script targeted only one
+redacted cloud-side entity. The other vacuum entity appears to come from a
+separate local integration path and must stay out of bridge proof unless a script
+targets it. All-domain `vacuum` counts were too broad. A local `expected_effect`
+may track the script target and require `docked`, but the start/return transition
+can still be asynchronous. If the first wait mismatches and a second return is
+needed, report `restored / reversible with retry`; do not collapse that into a
+single-command green proof.
 
 Do not add `expected_effect` to `switch:unknown` actions just to make `CheckState`
 green. Script entity state `off` only means the script is not running; it is not

@@ -93,6 +93,50 @@ actions:
     #   entity_id: "cover.demo_curtain"
     #   expected_state: "closed"
 
+  vacuum_return:
+    label: "掃除機を充電台に戻す"
+    ha_script: "script.demo_vacuum_return"
+    confirm_required: true
+    response_text: "掃除機を充電台に戻しました。"
+    control_type: "job_command"
+    state_authority: "ha_entity"
+    verification:
+      mode: "ha_state"
+      accepted_states: ["docked"]
+      settle_seconds: 10
+      timeout_seconds: 75
+    expected_effect:
+      domain: "vacuum"
+      service: "return_to_base"
+      # Track the script target entity only. Do not use all vacuum domain counts
+      # when Home Assistant exposes local and cloud entities for one appliance.
+      entity_id: "vacuum.demo_cloud_target"
+      expected_state: "docked"
+
+  # Future air conditioner actions should not add expected_effect to an unknown
+  # switch. If a same-device climate entity is available, design a separate
+  # climate service action and prove it before switching to ha_state verification.
+  # The bridge still calls script.turn_on; put the climate.* service call inside
+  # the Home Assistant script, then track the climate entity, for example:
+  #
+  # aircon_cool:
+  #   label: "エアコンを冷房にする"
+  #   ha_script: "script.demo_aircon_cool"
+  #   confirm_required: true
+  #   response_text: "エアコンを冷房にしました。"
+  #   control_type: "mode_command"
+  #   state_authority: "ha_entity"
+  #   verification:
+  #     mode: "ha_state"
+  #     accepted_states: ["cool"]
+  #     settle_seconds: 5
+  #     timeout_seconds: 60
+  #   expected_effect:
+  #     domain: "climate"
+  #     service: "set_hvac_mode"
+  #     entity_id: "climate.demo_aircon"
+  #     expected_state: "cool"
+
   projection_mode:
     label: "プロジェクションモードにする"
     ha_script: "script.projection_mode"
