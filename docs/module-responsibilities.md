@@ -74,7 +74,7 @@ authority is proven:
 | light on/off | `switch:unknown` | `stateless_toggle`, `open_loop`, `external_observation` | External sensor/camera/manual proof only |
 | fan on/off | `switch:unknown` | `stateless_command`, `submitted_only`, `command_ack_only` | External observation if needed |
 | aircon on/off | `switch:unknown`; a same-device `climate` candidate exists | `stateless_command`, `submitted_only`, `command_ack_only` | `mode_command` only after the climate service path is designed and proven |
-| door open/close | `cover:open` observed | `position_command`, `submitted_only`, `command_ack_only` | `ha_state` after execute/wait proof confirms stable open/closed state |
+| door open/close | `cover:open` with position changes observed | `position_command`, `submitted_only`, `command_ack_only` | Position-aware proof required before `ha_state`; open/closed state alone was not enough |
 | door stop | transient cover command | `position_command`, `submitted_only`, `command_ack_only` | External/manual confirmation, not simple HA state proof |
 | vacuum return | target cloud-side vacuum entity `docked`; separate local vacuum entity also exists | `job_command`, target-specific `ha_entity`, `ha_state` after local config promotion | Check only the script target; report retry if the first wait does not reach `docked` |
 | vacuum start/pause | job state uncertain | `job_command`, `submitted_only`, `command_ack_only` | Accepted states and settle/timeout windows required first |
@@ -100,3 +100,9 @@ single-command green proof.
 Do not add `expected_effect` to `switch:unknown` actions just to make `CheckState`
 green. Script entity state `off` only means the script is not running; it is not
 appliance off-state.
+
+For the 2026-06-09 door/cover pilot, `door_close` was accepted but the target
+cover stayed `open` and only its position moved to a partial value. `door_open`
+needed an extra restore command to return position near fully open. Keep
+door/cover actions as `command_ack_only` until the bridge supports and proves
+position-aware checks such as a numeric `current_position` threshold.
