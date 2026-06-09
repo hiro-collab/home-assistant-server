@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 
 ACTION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_:-]{0,79}$")
@@ -87,6 +87,28 @@ class ExpectedEffectConfig(BaseModel):
         return value
 
 
+class PositionProofConfig(BaseModel):
+    attribute: str = Field(default="current_position", min_length=1, max_length=80)
+    min: float | None = Field(default=None, ge=0, le=100)
+    max: float | None = Field(default=None, ge=0, le=100)
+
+    @field_validator("attribute")
+    @classmethod
+    def normalize_attribute(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("position attribute must not be empty")
+        return value
+
+    @model_validator(mode="after")
+    def validate_bounds(self):
+        if self.min is None and self.max is None:
+            raise ValueError("position proof requires min or max")
+        if self.min is not None and self.max is not None and self.min > self.max:
+            raise ValueError("position proof min must be less than or equal to max")
+        return self
+
+
 ControlType = Literal[
     "stateful_target",
     "stateless_toggle",
@@ -126,6 +148,7 @@ class VerificationConfig(BaseModel):
     accepted_states: list[str] = Field(default_factory=list, max_length=12)
     settle_seconds: float = Field(default=0.0, ge=0, le=600)
     timeout_seconds: float = Field(default=0.0, ge=0, le=1800)
+    position: PositionProofConfig | None = None
 
     @field_validator("accepted_states")
     @classmethod
@@ -140,6 +163,12 @@ class VerificationConfig(BaseModel):
             if state not in states:
                 states.append(state)
         return states
+
+    @model_validator(mode="after")
+    def validate_position_mode(self):
+        if self.position is not None and self.mode != "ha_state":
+            raise ValueError("position proof is only supported with verification.mode: ha_state")
+        return self
 
 
 FaultScenario = Literal[
@@ -336,6 +365,9 @@ def action_preview_payload(action_id: str, action: ActionConfig) -> dict[str, An
     effect = action_public_expected_effect(action)
     if effect is not None:
         payload["expected_effect"] = effect
+    position_proof = action_public_position_proof(action)
+    if position_proof is not None:
+        payload["position_proof"] = position_proof
     return payload
 
 
@@ -390,6 +422,14 @@ def action_public_expected_effect(action: ActionConfig) -> dict[str, str] | None
     if action.expected_effect is None:
         return None
     return action.expected_effect.model_dump()
+
+
+def action_public_position_proof(action: ActionConfig) -> dict[str, object] | None:
+    if action_state_tracking_status(action) != "tracked":
+        return None
+    if action.verification is None or action.verification.position is None:
+        return None
+    return action.verification.position.model_dump(exclude_none=True)
 
 
 def action_expected_states(action: ActionConfig) -> list[str]:

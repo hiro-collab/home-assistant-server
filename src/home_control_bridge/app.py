@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 from hashlib import sha256
 from datetime import UTC, datetime
+from math import isfinite
 from time import monotonic
 from typing import Annotated
 from uuid import uuid4
@@ -19,6 +20,7 @@ from .config import (
     action_expected_states,
     action_preview_payload,
     action_public_expected_effect,
+    action_public_position_proof,
     action_settle_seconds,
     action_state_authority,
     action_state_tracking_status,
@@ -28,7 +30,7 @@ from .config import (
     load_config,
 )
 from .faults import FaultContext, FaultDecision, evaluate_fault
-from .home_assistant import HomeAssistantClient, HomeAssistantError
+from .home_assistant import HomeAssistantClient, HomeAssistantEntityState, HomeAssistantError
 from .schemas import ActionRequest, ActionResponse, ActionStateResponse, ActionSummary, HealthResponse
 from .udp_events import UdpEventPhase, UdpEventSender
 
@@ -154,8 +156,9 @@ def create_app(
                 state_authority=action_state_authority(action),
                 verification_mode=action_verification_mode(action),
                 state_tracking=action_state_tracking_status(action),
-                verification=action.verification.model_dump() if action.verification is not None else None,
+                verification=action.verification.model_dump(exclude_none=True) if action.verification is not None else None,
                 expected_effect=_expected_effect_payload(action),
+                position_proof=_position_proof_payload(action),
                 expected_states=action_expected_states(action),
                 settle_seconds=action_settle_seconds(action),
                 timeout_seconds=action_timeout_seconds(action),
@@ -184,7 +187,7 @@ def create_app(
         expected_state = action.expected_effect.expected_state
         expected_states = action_expected_states(action)
         try:
-            actual_state = await app.state.ha_client.get_entity_state(action.expected_effect.entity_id)
+            entity_state = await app.state.ha_client.get_entity_state_snapshot(action.expected_effect.entity_id)
         except HomeAssistantError:
             return ActionStateResponse(
                 ok=False,
@@ -193,9 +196,19 @@ def create_app(
                 expected_state=expected_state,
                 expected_states=expected_states,
                 **tracking_fields,
+                **_empty_position_state_fields(action),
             )
 
-        status = "matched" if actual_state in expected_states else "mismatch"
+        actual_state = entity_state.state
+        position_fields = _position_state_fields(action, entity_state)
+        position_status = position_fields["position_status"]
+        state_matched = actual_state in expected_states
+        if position_status == "unavailable":
+            status = "position_unavailable"
+        elif state_matched and position_status in (None, "matched"):
+            status = "matched"
+        else:
+            status = "mismatch"
         return ActionStateResponse(
             ok=status == "matched",
             action_id=action_id,
@@ -204,6 +217,7 @@ def create_app(
             expected_states=expected_states,
             actual_state=actual_state,
             **tracking_fields,
+            **position_fields,
         )
 
     @app.post(
@@ -947,6 +961,10 @@ def _expected_effect_payload(action: ActionConfig) -> dict[str, str] | None:
     return action_public_expected_effect(action)
 
 
+def _position_proof_payload(action: ActionConfig) -> dict[str, object] | None:
+    return action_public_position_proof(action)
+
+
 def _state_tracking_summary_fields(action: ActionConfig) -> dict[str, str]:
     return {
         "control_type": action_control_type(action),
@@ -961,6 +979,7 @@ def _response_tracking_fields(action: ActionConfig) -> dict[str, object]:
     fields["expected_states"] = action_expected_states(action)
     fields["settle_seconds"] = action_settle_seconds(action)
     fields["timeout_seconds"] = action_timeout_seconds(action)
+    fields["position_proof"] = _position_proof_payload(action)
     effect = _expected_effect_payload(action)
     fields["expected_effect"] = effect
     if effect is None:
@@ -987,11 +1006,71 @@ def _expected_effect_audit_fields(action: ActionConfig) -> dict[str, object]:
     fields["expected_states"] = action_expected_states(action)
     fields["settle_seconds"] = action_settle_seconds(action)
     fields["timeout_seconds"] = action_timeout_seconds(action)
+    fields["position_proof"] = _position_proof_payload(action)
     effect = _expected_effect_payload(action)
     if effect is None:
         return fields
     fields["expected_effect"] = effect
     return fields
+
+
+def _empty_position_state_fields(action: ActionConfig) -> dict[str, object]:
+    proof = _position_proof_payload(action)
+    if proof is None:
+        return {
+            "position_attribute": None,
+            "expected_position_min": None,
+            "expected_position_max": None,
+            "actual_position": None,
+            "position_status": None,
+        }
+    return {
+        "position_attribute": proof["attribute"],
+        "expected_position_min": proof.get("min"),
+        "expected_position_max": proof.get("max"),
+        "actual_position": None,
+        "position_status": "unavailable",
+    }
+
+
+def _position_state_fields(action: ActionConfig, entity_state: HomeAssistantEntityState) -> dict[str, object]:
+    proof = _position_proof_payload(action)
+    if proof is None:
+        return _empty_position_state_fields(action)
+
+    position = _coerce_position(entity_state.attributes.get(proof["attribute"]))
+    min_position = proof.get("min")
+    max_position = proof.get("max")
+    matched = position is not None
+    if matched and min_position is not None:
+        matched = position >= float(min_position)
+    if matched and max_position is not None:
+        matched = position <= float(max_position)
+
+    return {
+        "position_attribute": proof["attribute"],
+        "expected_position_min": min_position,
+        "expected_position_max": max_position,
+        "actual_position": position,
+        "position_status": ("matched" if matched else "mismatch") if position is not None else "unavailable",
+    }
+
+
+def _coerce_position(value: object) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        position = float(value)
+    elif isinstance(value, str):
+        try:
+            position = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    if not isfinite(position):
+        return None
+    return position
 
 
 def _audit(app: FastAPI, event: dict) -> None:

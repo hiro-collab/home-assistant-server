@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -9,8 +10,9 @@ from pydantic import ValidationError
 
 from home_control_bridge.app import create_app
 from home_control_bridge.audit import JsonlAuditLogger
-from home_control_bridge.config import BridgeConfig, ConfigError, get_required_secret
+from home_control_bridge.config import BridgeConfig, ConfigError, get_required_secret, load_config
 from home_control_bridge.faults import FaultContext, MAX_FAULT_ATTEMPT_STATE, evaluate_fault
+from home_control_bridge.home_assistant import HomeAssistantEntityState
 
 
 class FakeUdpEventSender:
@@ -26,7 +28,7 @@ class FakeUdpEventSender:
 
 
 class FakeHomeAssistant:
-    def __init__(self, *, fail: bool = False, fail_state: bool = False, states: dict[str, str] | None = None) -> None:
+    def __init__(self, *, fail: bool = False, fail_state: bool = False, states: dict[str, object] | None = None) -> None:
         self.calls: list[str] = []
         self.state_calls: list[str] = []
         self.fail = fail
@@ -45,12 +47,22 @@ class FakeHomeAssistant:
         return {"status_code": 200, "body": [{"entity_id": script_entity_id}]}
 
     async def get_entity_state(self, entity_id: str):
+        return (await self.get_entity_state_snapshot(entity_id)).state
+
+    async def get_entity_state_snapshot(self, entity_id: str):
         self.state_calls.append(entity_id)
         if self.fail_state:
             from home_control_bridge.home_assistant import HomeAssistantError
 
             raise HomeAssistantError("state unavailable")
-        return self.states.get(entity_id, "unknown")
+        value = self.states.get(entity_id, "unknown")
+        if isinstance(value, dict):
+            state = value.get("state", "unknown")
+            attributes = value.get("attributes", {})
+        else:
+            state = value
+            attributes = {}
+        return HomeAssistantEntityState(state=str(state), attributes=attributes if isinstance(attributes, dict) else {})
 
 
 @pytest.fixture
@@ -125,6 +137,15 @@ def assert_uuid(value: str) -> None:
     assert str(UUID(value)) == value
 
 
+NO_POSITION_STATE_FIELDS = {
+    "position_attribute": None,
+    "expected_position_min": None,
+    "expected_position_max": None,
+    "actual_position": None,
+    "position_status": None,
+}
+
+
 def config_with_faults(config, rules, *, enabled: bool = True):
     raw = config.model_dump(mode="json")
     raw["faults"] = {
@@ -136,6 +157,21 @@ def config_with_faults(config, rules, *, enabled: bool = True):
 
 def read_logs(log_path):
     return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_example_config_loads_with_demo_climate_aircon_actions():
+    config_path = Path(__file__).resolve().parents[1] / "config" / "home-control.example.yaml"
+
+    loaded = load_config(config_path)
+
+    assert loaded.actions["aircon_cool"].control_type == "mode_command"
+    assert loaded.actions["aircon_cool"].verification is not None
+    assert loaded.actions["aircon_cool"].verification.mode == "ha_state"
+    assert loaded.actions["aircon_cool"].expected_effect is not None
+    assert loaded.actions["aircon_cool"].expected_effect.domain == "climate"
+    assert loaded.actions["aircon_cool"].expected_effect.service == "set_hvac_mode"
+    assert loaded.actions["aircon_hvac_off"].expected_effect is not None
+    assert loaded.actions["aircon_hvac_off"].expected_effect.expected_state == "off"
 
 
 def test_health_is_available_without_bridge_token(config, token, tmp_path):
@@ -204,6 +240,7 @@ def test_action_state_returns_redacted_match(config, token, tmp_path):
         "expected_state": "on",
         "expected_states": ["on"],
         "actual_state": "on",
+        **NO_POSITION_STATE_FIELDS,
     }
     assert "entity_id" not in body
     assert ha.state_calls == ["light.demo_room"]
@@ -254,6 +291,108 @@ def test_action_state_matches_accepted_states(config, token, tmp_path):
     assert action["timeout_seconds"] == 30
 
 
+def test_cover_action_state_requires_position_threshold(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["curtain_close"]["state_authority"] = "ha_entity"
+    raw["actions"]["curtain_close"]["verification"] = {
+        "mode": "ha_state",
+        "accepted_states": ["closed"],
+        "settle_seconds": 8,
+        "timeout_seconds": 60,
+        "position": {"attribute": "current_position", "max": 5},
+    }
+    raw["actions"]["curtain_close"]["expected_effect"] = {
+        "domain": "cover",
+        "service": "close_cover",
+        "entity_id": "cover.demo_curtain",
+        "expected_state": "closed",
+    }
+    cover_config = BridgeConfig.model_validate(raw)
+    ha = FakeHomeAssistant(
+        states={"cover.demo_curtain": {"state": "closed", "attributes": {"current_position": "2"}}}
+    )
+    client, _, _, _ = make_client(cover_config, token, tmp_path, ha=ha)
+
+    actions_response = client.get("/actions", headers=auth_headers(token))
+    action = next(action for action in actions_response.json() if action["action_id"] == "curtain_close")
+    assert action["state_tracking"] == "tracked"
+    assert action["position_proof"] == {"attribute": "current_position", "min": None, "max": 5.0}
+
+    response = client.get("/actions/curtain_close/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["status"] == "matched"
+    assert body["expected_state"] == "closed"
+    assert body["expected_states"] == ["closed"]
+    assert body["actual_state"] == "closed"
+    assert body["position_attribute"] == "current_position"
+    assert body["expected_position_min"] is None
+    assert body["expected_position_max"] == 5.0
+    assert body["actual_position"] == 2.0
+    assert body["position_status"] == "matched"
+    assert "entity_id" not in body
+
+
+def test_cover_action_state_rejects_state_match_when_position_is_outside_threshold(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["curtain_close"]["state_authority"] = "ha_entity"
+    raw["actions"]["curtain_close"]["verification"] = {
+        "mode": "ha_state",
+        "accepted_states": ["closed"],
+        "position": {"attribute": "current_position", "max": 5},
+    }
+    raw["actions"]["curtain_close"]["expected_effect"] = {
+        "domain": "cover",
+        "service": "close_cover",
+        "entity_id": "cover.demo_curtain",
+        "expected_state": "closed",
+    }
+    cover_config = BridgeConfig.model_validate(raw)
+    ha = FakeHomeAssistant(states={"cover.demo_curtain": {"state": "closed", "attributes": {"current_position": 42}}})
+    client, _, _, _ = make_client(cover_config, token, tmp_path, ha=ha)
+
+    response = client.get("/actions/curtain_close/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["status"] == "mismatch"
+    assert body["actual_state"] == "closed"
+    assert body["actual_position"] == 42.0
+    assert body["position_status"] == "mismatch"
+
+
+def test_cover_action_state_reports_missing_position_attribute_as_unavailable(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["curtain_close"]["state_authority"] = "ha_entity"
+    raw["actions"]["curtain_close"]["verification"] = {
+        "mode": "ha_state",
+        "accepted_states": ["closed"],
+        "position": {"attribute": "current_position", "max": 5},
+    }
+    raw["actions"]["curtain_close"]["expected_effect"] = {
+        "domain": "cover",
+        "service": "close_cover",
+        "entity_id": "cover.demo_curtain",
+        "expected_state": "closed",
+    }
+    cover_config = BridgeConfig.model_validate(raw)
+    ha = FakeHomeAssistant(states={"cover.demo_curtain": {"state": "closed", "attributes": {}}})
+    client, _, _, _ = make_client(cover_config, token, tmp_path, ha=ha)
+
+    response = client.get("/actions/curtain_close/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["status"] == "position_unavailable"
+    assert body["actual_state"] == "closed"
+    assert body["actual_position"] is None
+    assert body["position_status"] == "unavailable"
+
+
 def test_action_state_ack_only_action_does_not_call_home_assistant(config, token, tmp_path):
     client, ha, _, _ = make_client(config, token, tmp_path)
 
@@ -271,6 +410,7 @@ def test_action_state_ack_only_action_does_not_call_home_assistant(config, token
         "expected_state": None,
         "expected_states": [],
         "actual_state": None,
+        **NO_POSITION_STATE_FIELDS,
     }
     assert ha.state_calls == []
 
@@ -305,8 +445,111 @@ def test_external_observation_action_ignores_legacy_expected_effect(config, toke
         "expected_state": None,
         "expected_states": [],
         "actual_state": None,
+        **NO_POSITION_STATE_FIELDS,
     }
     assert ha.state_calls == []
+
+
+def test_command_ack_only_action_ignores_legacy_expected_effect(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["curtain_close"]["control_type"] = "stateless_command"
+    raw["actions"]["curtain_close"]["state_authority"] = "submitted_only"
+    raw["actions"]["curtain_close"]["verification"] = {"mode": "command_ack_only"}
+    raw["actions"]["curtain_close"]["expected_effect"] = {
+        "domain": "switch",
+        "service": "turn_off",
+        "entity_id": "switch.demo_unknown_aircon_wrapper",
+        "expected_state": "off",
+    }
+    ack_only_config = BridgeConfig.model_validate(raw)
+    client, ha, _, _ = make_client(ack_only_config, token, tmp_path)
+
+    actions_response = client.get("/actions", headers=auth_headers(token))
+    action = next(action for action in actions_response.json() if action["action_id"] == "curtain_close")
+    assert action["control_type"] == "stateless_command"
+    assert action["state_authority"] == "submitted_only"
+    assert action["verification_mode"] == "command_ack_only"
+    assert action["state_tracking"] == "ack_only"
+    assert action["expected_effect"] is None
+
+    state_response = client.get("/actions/curtain_close/state", headers=auth_headers(token))
+
+    assert state_response.status_code == 200
+    assert state_response.json() == {
+        "ok": False,
+        "action_id": "curtain_close",
+        "status": "ack_only",
+        "control_type": "stateless_command",
+        "state_authority": "submitted_only",
+        "verification_mode": "command_ack_only",
+        "state_tracking": "ack_only",
+        "expected_state": None,
+        "expected_states": [],
+        "actual_state": None,
+        **NO_POSITION_STATE_FIELDS,
+    }
+    assert ha.state_calls == []
+
+
+def test_climate_mode_action_tracks_hvac_state(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["aircon_cool"] = {
+        "label": "エアコンを冷房にする",
+        "ha_script": "script.demo_aircon_cool",
+        "confirm_required": True,
+        "response_text": "エアコンを冷房にしました。",
+        "control_type": "mode_command",
+        "state_authority": "ha_entity",
+        "verification": {
+            "mode": "ha_state",
+            "accepted_states": ["cool"],
+            "settle_seconds": 5,
+            "timeout_seconds": 60,
+        },
+        "expected_effect": {
+            "domain": "climate",
+            "service": "set_hvac_mode",
+            "entity_id": "climate.demo_aircon",
+            "expected_state": "cool",
+        },
+    }
+    climate_config = BridgeConfig.model_validate(raw)
+    ha = FakeHomeAssistant(states={"climate.demo_aircon": "cool"})
+    client, _, _, _ = make_client(climate_config, token, tmp_path, ha=ha)
+
+    actions_response = client.get("/actions", headers=auth_headers(token))
+    action = next(action for action in actions_response.json() if action["action_id"] == "aircon_cool")
+    assert action["control_type"] == "mode_command"
+    assert action["state_authority"] == "ha_entity"
+    assert action["verification_mode"] == "ha_state"
+    assert action["state_tracking"] == "tracked"
+    assert action["expected_states"] == ["cool"]
+    assert action["settle_seconds"] == 5
+    assert action["timeout_seconds"] == 60
+    assert action["expected_effect"] == {
+        "domain": "climate",
+        "service": "set_hvac_mode",
+        "entity_id": "climate.demo_aircon",
+        "expected_state": "cool",
+    }
+
+    state_response = client.get("/actions/aircon_cool/state", headers=auth_headers(token))
+
+    assert state_response.status_code == 200
+    assert state_response.json() == {
+        "ok": True,
+        "action_id": "aircon_cool",
+        "status": "matched",
+        "control_type": "mode_command",
+        "state_authority": "ha_entity",
+        "verification_mode": "ha_state",
+        "state_tracking": "tracked",
+        "expected_state": "cool",
+        "expected_states": ["cool"],
+        "actual_state": "cool",
+        **NO_POSITION_STATE_FIELDS,
+    }
+    assert ha.state_calls == ["climate.demo_aircon"]
 
 
 def test_action_state_unavailable_is_redacted(config, token, tmp_path):
@@ -1053,6 +1296,25 @@ def test_config_rejects_potentially_catastrophic_fault_regex(config):
                 }
             ],
         )
+
+
+def test_config_rejects_position_proof_without_threshold(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"]["verification"]["position"] = {"attribute": "current_position"}
+
+    with pytest.raises(ValidationError):
+        BridgeConfig.model_validate(raw)
+
+
+def test_config_rejects_position_proof_without_ha_state_mode(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["curtain_close"]["verification"] = {
+        "mode": "command_ack_only",
+        "position": {"attribute": "current_position", "max": 5},
+    }
+
+    with pytest.raises(ValidationError):
+        BridgeConfig.model_validate(raw)
 
 
 def test_placeholder_bridge_token_is_rejected(monkeypatch):

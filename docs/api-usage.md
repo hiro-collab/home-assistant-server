@@ -37,6 +37,9 @@ Content-Type: application/json
 `expected_state`、`expected_states`、`actual_state`、`status` を見て判定します。
 `expected_states` は、cover / vacuum / climate などで複数の完了 state を許容する時の
 読み取り専用 proof 条件です。`status: "matched"` 以外は、実行 proof ではなく追加確認が必要な状態です。
+cover / door のように `verification.position` が設定された action では、
+`expected_position_min` / `expected_position_max` と `actual_position` も判定対象です。
+state が一致していても `position_status: "matched"` でなければ `status: "matched"` にはなりません。
 catalog / preview には `settle_seconds` と `timeout_seconds` も出ますが、これは実行後に
 どれだけ待ってから state を読むかのメタデータであり、それ単体では proof ではありません。
 

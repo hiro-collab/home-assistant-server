@@ -79,7 +79,9 @@ actions:
       mode: "command_ack_only"
 
     # If a later read-only review and ticketed execute/wait proof show this
-    # cover entity reports stable closed/open states, switch to:
+    # cover entity reports stable state plus current_position, switch to a
+    # position-aware post-state check. Closed proof should require both the
+    # expected state and current_position below a conservative threshold:
     #
     # state_authority: "ha_entity"
     # verification:
@@ -87,11 +89,17 @@ actions:
     #   accepted_states: ["closed"]
     #   settle_seconds: 8
     #   timeout_seconds: 60
+    #   position:
+    #     attribute: "current_position"
+    #     max: 5
     # expected_effect:
     #   domain: "cover"
     #   service: "close_cover"
     #   entity_id: "cover.demo_curtain"
     #   expected_state: "closed"
+    #
+    # Open/restore proof should use a separate action with expected_state:
+    # "open" and position.min such as 95 after the local device is reviewed.
 
   vacuum_return:
     label: "掃除機を充電台に戻す"
@@ -113,29 +121,45 @@ actions:
       entity_id: "vacuum.demo_cloud_target"
       expected_state: "docked"
 
-  # Future air conditioner actions should not add expected_effect to an unknown
-  # switch. If a same-device climate entity is available, design a separate
-  # climate service action and prove it before switching to ha_state verification.
-  # The bridge still calls script.turn_on; put the climate.* service call inside
-  # the Home Assistant script, then track the climate entity, for example:
-  #
-  # aircon_cool:
-  #   label: "エアコンを冷房にする"
-  #   ha_script: "script.demo_aircon_cool"
-  #   confirm_required: true
-  #   response_text: "エアコンを冷房にしました。"
-  #   control_type: "mode_command"
-  #   state_authority: "ha_entity"
-  #   verification:
-  #     mode: "ha_state"
-  #     accepted_states: ["cool"]
-  #     settle_seconds: 5
-  #     timeout_seconds: 60
-  #   expected_effect:
-  #     domain: "climate"
-  #     service: "set_hvac_mode"
-  #     entity_id: "climate.demo_aircon"
-  #     expected_state: "cool"
+  # Demo-only air conditioner candidates. Do not add expected_effect to an
+  # unknown switch wrapper just to make CheckState green. If a same-device
+  # climate entity is available, keep the service call inside a Home Assistant
+  # script and track the climate entity as a separate mode_command action.
+  aircon_cool:
+    label: "エアコンを冷房にする"
+    ha_script: "script.demo_aircon_cool"
+    confirm_required: true
+    response_text: "エアコンを冷房にしました。"
+    control_type: "mode_command"
+    state_authority: "ha_entity"
+    verification:
+      mode: "ha_state"
+      accepted_states: ["cool"]
+      settle_seconds: 5
+      timeout_seconds: 60
+    expected_effect:
+      domain: "climate"
+      service: "set_hvac_mode"
+      entity_id: "climate.demo_aircon"
+      expected_state: "cool"
+
+  aircon_hvac_off:
+    label: "エアコンを停止する"
+    ha_script: "script.demo_aircon_hvac_off"
+    confirm_required: true
+    response_text: "エアコンを停止しました。"
+    control_type: "mode_command"
+    state_authority: "ha_entity"
+    verification:
+      mode: "ha_state"
+      accepted_states: ["off"]
+      settle_seconds: 5
+      timeout_seconds: 60
+    expected_effect:
+      domain: "climate"
+      service: "set_hvac_mode"
+      entity_id: "climate.demo_aircon"
+      expected_state: "off"
 
   projection_mode:
     label: "プロジェクションモードにする"

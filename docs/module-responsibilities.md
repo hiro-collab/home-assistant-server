@@ -45,6 +45,13 @@ Home Assistant の現在 state を読み取り専用で比較します。これ�
 対象 action が HA state tracking 可能かだけを確認します。実行前に `matched` でないことは、
 bridge 起動失敗や action catalog 失敗を意味しません。
 
+For cover/door actions where Home Assistant exposes `attributes.current_position`,
+state-only proof is not enough. Add `verification.position` with an inclusive
+numeric threshold such as `max: 5` for closed or `min: 95` for open, and treat
+`/actions/{action_id}/state` as matched only when both the accepted state and
+the position threshold match. If the attribute is missing or non-numeric, report
+the proof as unavailable instead of falling back to `open` / `closed` alone.
+
 For actions with reliable HA state but slower transitions, `verification.accepted_states`
 can list additional acceptable end states, and `settle_seconds` / `timeout_seconds`
 document the wait window for the ticketed execute/wait/post-state procedure. These fields
@@ -54,9 +61,13 @@ shadow state into physical proof.
 
 Use separate proof labels in reports and API clients:
 
-- `command accepted`: bridge/Home Assistant accepted the command; this is not appliance-state proof.
+- `command_ack_only`: bridge/Home Assistant accepted the command; this is not appliance-state proof.
+- `external_required`: the action cannot produce HA state proof and needs another proof route.
+- `external_observation`: redacted camera, Environment State, separate-sensor, or manual evidence supports the physical-state claim.
+- `manual_required`: automated proof is insufficient; operator confirmation is needed before claiming state.
+- `external_inconclusive`: external evidence exists but is partial, stale, conflicted, or too ambiguous for the claim.
+- `conflict`: source layers disagree; preserve redacted refs and do not silently re-operate.
 - `HA state matched`: the post-action or post-restore state matched expected/accepted states.
-- `external observed`: camera, sensor, manual observation, or another independent source confirmed reality.
 - `restored / reversible`: the action and its restore path were both proven at their own layers.
 
 SwitchBot remote-style のライトのように、押すたびに物理状態だけが反転し Home Assistant では
@@ -78,6 +89,25 @@ authority is proven:
 | door stop | transient cover command | `position_command`, `submitted_only`, `command_ack_only` | External/manual confirmation, not simple HA state proof |
 | vacuum return | target cloud-side vacuum entity `docked`; separate local vacuum entity also exists | `job_command`, target-specific `ha_entity`, `ha_state` after local config promotion | Check only the script target; report retry if the first wait does not reach `docked` |
 | vacuum start/pause | job state uncertain | `job_command`, `submitted_only`, `command_ack_only` | Accepted states and settle/timeout windows required first |
+
+External observation candidates stay outside HA state proof until the named
+route is separately designed and proven:
+
+| Action family | Candidate external route | Keep as | HA state proof promotion stays blocked when |
+| --- | --- | --- | --- |
+| light on/off | Environment State from a separate power/light sensor; camera brightness summary; manual visual confirmation | `external_observation` if configured as `stateless_toggle`, otherwise `command_ack_only` plus `external_required` result wording | HA state is `unknown`, script-wrapper state is used, or daylight/camera ambiguity remains |
+| fan on/off | Environment State from power, vibration, rotation, or airflow evidence; camera motion summary; manual visual confirmation | `command_ack_only` unless a separate observation route is ticketed | command acceptance is the only signal, or audio/recording proof has no explicit GO |
+| door/cover open/close | Contact/position evidence through Environment State; camera position summary; manual visual confirmation | `command_ack_only` until position thresholds are configured and proven | `state=open` / `closed` can disagree with `current_position`, the threshold is missing, or the observed movement is partial |
+| aircon on/off | Reliable climate state; Environment State appliance state; power plus temperature trend; visual LED/louver summary; manual confirmation | `command_ack_only` for current IR/switch wrappers | only IR/script accepted is known, climate target is not designed, or temperature trend is delayed/inconclusive |
+
+For air conditioner migration, keep existing `aircon_on` / `aircon_off` switch
+wrappers at `command_ack_only` until a separate climate path is source/static
+designed and later proven. The safe bridge shape is a new action such as
+`aircon_cool` or `aircon_hvac_off` with `control_type: mode_command`,
+`state_authority: ha_entity`, `verification.mode: ha_state`, and an
+`expected_effect` that names the redacted/demo `climate` target and expected HVAC
+state. The bridge still calls `script.turn_on`; the Home Assistant script owns
+the `climate.set_hvac_mode` service call.
 
 Define vacuum start and return criteria independently. Start-side proof must name
 which states count as progress, such as `cleaning`, `returning`, or explicitly
@@ -103,6 +133,7 @@ appliance off-state.
 
 For the 2026-06-09 door/cover pilot, `door_close` was accepted but the target
 cover stayed `open` and only its position moved to a partial value. `door_open`
-needed an extra restore command to return position near fully open. Keep
-door/cover actions as `command_ack_only` until the bridge supports and proves
-position-aware checks such as a numeric `current_position` threshold.
+needed an extra restore command to return position near fully open. Keep the
+current door/cover actions as `command_ack_only` until local config adds
+position thresholds and a ticketed execute/wait/CheckState plus restore/wait/
+CheckState proves those thresholds on the actual target.

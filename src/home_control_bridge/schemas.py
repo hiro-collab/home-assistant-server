@@ -12,6 +12,12 @@ class ExpectedEffect(BaseModel):
     expected_state: str
 
 
+class PositionProof(BaseModel):
+    attribute: str = "current_position"
+    min: float | None = None
+    max: float | None = None
+
+
 class Verification(BaseModel):
     mode: Literal[
         "ha_state",
@@ -23,6 +29,7 @@ class Verification(BaseModel):
     accepted_states: list[str] = Field(default_factory=list)
     settle_seconds: float = 0.0
     timeout_seconds: float = 0.0
+    position: PositionProof | None = None
 
 
 class ActionSummary(BaseModel):
@@ -64,6 +71,7 @@ class ActionSummary(BaseModel):
     ]
     verification: Verification | None = None
     expected_effect: ExpectedEffect | None = None
+    position_proof: PositionProof | None = None
     expected_states: list[str] = Field(default_factory=list)
     settle_seconds: float = 0.0
     timeout_seconds: float = 0.0
@@ -77,6 +85,7 @@ class ActionStateResponse(BaseModel):
         "mismatch",
         "untracked",
         "unavailable",
+        "position_unavailable",
         "external_required",
         "ack_only",
         "manual_required",
@@ -89,6 +98,11 @@ class ActionStateResponse(BaseModel):
     expected_state: str | None = None
     expected_states: list[str] = Field(default_factory=list)
     actual_state: str | None = None
+    position_attribute: str | None = None
+    expected_position_min: float | None = None
+    expected_position_max: float | None = None
+    actual_position: float | None = None
+    position_status: Literal["matched", "mismatch", "unavailable"] | None = None
 
 
 class ActionRequest(BaseModel):
@@ -129,6 +143,7 @@ class ActionResponse(BaseModel):
     verification_mode: str | None = None
     state_tracking: str | None = None
     expected_effect: ExpectedEffect | None = None
+    position_proof: PositionProof | None = None
     expected_states: list[str] = Field(default_factory=list)
     settle_seconds: float = 0.0
     timeout_seconds: float = 0.0

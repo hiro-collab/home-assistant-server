@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
@@ -13,6 +14,12 @@ class HomeAssistantError(RuntimeError):
         super().__init__(safe_message)
         self.safe_message = safe_message
         self.log_detail = log_detail or safe_message
+
+
+@dataclass(frozen=True)
+class HomeAssistantEntityState:
+    state: str
+    attributes: dict[str, Any]
 
 
 class HomeAssistantClient:
@@ -70,6 +77,9 @@ class HomeAssistantClient:
         }
 
     async def get_entity_state(self, entity_id: str) -> str:
+        return (await self.get_entity_state_snapshot(entity_id)).state
+
+    async def get_entity_state_snapshot(self, entity_id: str) -> HomeAssistantEntityState:
         encoded_entity_id = quote(entity_id, safe="")
         url = f"{self.config.base_url}/api/states/{encoded_entity_id}"
         try:
@@ -101,4 +111,8 @@ class HomeAssistantClient:
                 "Home Assistant state response did not include a state.",
                 log_detail="Home Assistant state response did not include a state.",
             )
-        return state
+
+        attributes = body.get("attributes") if isinstance(body, dict) else None
+        if not isinstance(attributes, dict):
+            attributes = {}
+        return HomeAssistantEntityState(state=state, attributes=attributes)

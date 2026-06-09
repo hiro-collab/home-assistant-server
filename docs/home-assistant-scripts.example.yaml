@@ -26,6 +26,26 @@ script:
         target:
           entity_id: cover.living_room_curtain
 
+  demo_aircon_cool:
+    alias: Demo - aircon cool
+    mode: single
+    sequence:
+      - service: climate.set_hvac_mode
+        target:
+          entity_id: climate.demo_aircon
+        data:
+          hvac_mode: cool
+
+  demo_aircon_hvac_off:
+    alias: Demo - aircon off
+    mode: single
+    sequence:
+      - service: climate.set_hvac_mode
+        target:
+          entity_id: climate.demo_aircon
+        data:
+          hvac_mode: "off"
+
   projection_mode:
     alias: Projection mode
     mode: single

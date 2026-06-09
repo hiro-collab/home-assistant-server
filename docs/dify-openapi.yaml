@@ -166,6 +166,10 @@ components:
         expected_effect:
           $ref: "#/components/schemas/ExpectedEffect"
           nullable: true
+        position_proof:
+          $ref: "#/components/schemas/PositionProof"
+          nullable: true
+          description: Optional position threshold required in addition to accepted state for cover/door proof.
         expected_states:
           type: array
           items:
@@ -205,12 +209,12 @@ components:
       properties:
         ok:
           type: boolean
-          description: True only when actual_state matches expected_state or one of expected_states.
+          description: True only when actual_state matches expected_state or one of expected_states, and any configured position threshold also matches.
         action_id:
           type: string
         status:
           type: string
-          enum: [matched, mismatch, untracked, unavailable, external_required, ack_only, manual_required, unsupported]
+          enum: [matched, mismatch, untracked, unavailable, position_unavailable, external_required, ack_only, manual_required, unsupported]
         control_type:
           type: string
           nullable: true
@@ -234,6 +238,30 @@ components:
         actual_state:
           type: string
           nullable: true
+        position_attribute:
+          type: string
+          nullable: true
+          description: HA state attribute used for position proof, usually current_position.
+        expected_position_min:
+          type: number
+          format: float
+          nullable: true
+          description: Inclusive minimum accepted position.
+        expected_position_max:
+          type: number
+          format: float
+          nullable: true
+          description: Inclusive maximum accepted position.
+        actual_position:
+          type: number
+          format: float
+          nullable: true
+          description: Redacted numeric position read from the target entity attributes.
+        position_status:
+          type: string
+          enum: [matched, mismatch, unavailable]
+          nullable: true
+          description: Result of the configured position threshold check.
     ActionResponse:
       type: object
       required: [ok, action_id, executed, status, confirmation_required, message, speak]
@@ -302,6 +330,9 @@ components:
         expected_effect:
           $ref: "#/components/schemas/ExpectedEffect"
           nullable: true
+        position_proof:
+          $ref: "#/components/schemas/PositionProof"
+          nullable: true
         expected_states:
           type: array
           items:
@@ -347,6 +378,29 @@ components:
           type: number
           format: float
           description: Suggested maximum wait window for ticketed state proof.
+        position:
+          $ref: "#/components/schemas/PositionProof"
+          nullable: true
+          description: Optional inclusive numeric position threshold required in addition to accepted state.
+    PositionProof:
+      type: object
+      required: [attribute]
+      properties:
+        attribute:
+          type: string
+          default: current_position
+        min:
+          type: number
+          format: float
+          nullable: true
+          minimum: 0
+          maximum: 100
+        max:
+          type: number
+          format: float
+          nullable: true
+          minimum: 0
+          maximum: 100
     ExpectedEffect:
       type: object
       required: [domain, service, entity_id, expected_state]
