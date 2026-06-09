@@ -37,7 +37,7 @@ actions:
     ha_script: "script.demo_light_on"
     confirm_required: false
     response_text: "照明をつける操作を送信しました。実際の点灯状態は外部観測で確認してください。"
-    control_type: "stateless_command"
+    control_type: "stateless_toggle"
     state_authority: "open_loop"
     verification:
       mode: "external_observation"
@@ -52,7 +52,7 @@ actions:
     ha_script: "script.demo_light_off"
     confirm_required: false
     response_text: "照明を消す操作を送信しました。実際の消灯状態は外部観測で確認してください。"
-    control_type: "stateless_command"
+    control_type: "stateless_toggle"
     state_authority: "open_loop"
     verification:
       mode: "external_observation"
