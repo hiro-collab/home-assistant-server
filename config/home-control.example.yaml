@@ -36,14 +36,11 @@ actions:
     label: "照明をつける"
     ha_script: "script.demo_light_on"
     confirm_required: false
-    response_text: "照明をつけました。"
-    control_type: "stateful_target"
-    state_authority: "ha_entity"
+    response_text: "照明をつける操作を送信しました。実際の点灯状態は外部観測で確認してください。"
+    control_type: "stateless_command"
+    state_authority: "open_loop"
     verification:
-      mode: "ha_state"
-      accepted_states: ["on"]
-      settle_seconds: 1
-      timeout_seconds: 10
+      mode: "external_observation"
     expected_effect:
       domain: "light"
       service: "turn_on"
@@ -54,14 +51,11 @@ actions:
     label: "照明を消す"
     ha_script: "script.demo_light_off"
     confirm_required: false
-    response_text: "照明を消しました。"
-    control_type: "stateful_target"
-    state_authority: "ha_entity"
+    response_text: "照明を消す操作を送信しました。実際の消灯状態は外部観測で確認してください。"
+    control_type: "stateless_command"
+    state_authority: "open_loop"
     verification:
-      mode: "ha_state"
-      accepted_states: ["off"]
-      settle_seconds: 1
-      timeout_seconds: 10
+      mode: "external_observation"
     expected_effect:
       domain: "light"
       service: "turn_off"
