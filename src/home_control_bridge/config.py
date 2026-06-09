@@ -87,6 +87,44 @@ class ExpectedEffectConfig(BaseModel):
         return value
 
 
+ControlType = Literal[
+    "stateful_target",
+    "stateless_toggle",
+    "stateless_command",
+    "position_command",
+    "mode_command",
+    "job_command",
+    "script_wrapper",
+]
+VerificationMode = Literal[
+    "ha_state",
+    "external_observation",
+    "command_ack_only",
+    "manual_confirmation",
+    "unsupported",
+]
+StateTrackingStatus = Literal[
+    "tracked",
+    "external_required",
+    "ack_only",
+    "manual_required",
+    "unsupported",
+]
+StateAuthority = Literal[
+    "ha_entity",
+    "ha_inferred",
+    "external_sensor",
+    "manual",
+    "open_loop",
+    "submitted_only",
+    "unknown",
+]
+
+
+class VerificationConfig(BaseModel):
+    mode: VerificationMode
+
+
 FaultScenario = Literal[
     "always_success",
     "fail_once_then_success",
@@ -178,6 +216,9 @@ class ActionConfig(BaseModel):
     ha_script: str
     confirm_required: bool = False
     response_text: str
+    control_type: ControlType | None = None
+    state_authority: StateAuthority | None = None
+    verification: VerificationConfig | None = None
     expected_effect: ExpectedEffectConfig | None = None
 
     @field_validator("ha_script")
@@ -267,7 +308,65 @@ def action_preview_payload(action_id: str, action: ActionConfig) -> dict[str, An
         "ha_script": action.ha_script,
         "confirm_required": action.confirm_required,
         "response_text": action.response_text,
+        "control_type": action_control_type(action),
+        "state_authority": action_state_authority(action),
+        "verification_mode": action_verification_mode(action),
+        "state_tracking": action_state_tracking_status(action),
     }
-    if action.expected_effect is not None:
-        payload["expected_effect"] = action.expected_effect.model_dump()
+    effect = action_public_expected_effect(action)
+    if effect is not None:
+        payload["expected_effect"] = effect
     return payload
+
+
+def action_control_type(action: ActionConfig) -> ControlType:
+    if action.control_type is not None:
+        return action.control_type
+    if action.expected_effect is not None:
+        return "stateful_target"
+    return "script_wrapper"
+
+
+def action_verification_mode(action: ActionConfig) -> VerificationMode:
+    if action.verification is not None:
+        return action.verification.mode
+    if action.expected_effect is not None:
+        return "ha_state"
+    return "command_ack_only"
+
+
+def action_state_authority(action: ActionConfig) -> StateAuthority:
+    if action.state_authority is not None:
+        return action.state_authority
+
+    mode = action_verification_mode(action)
+    if mode == "ha_state":
+        return "ha_entity"
+    if mode == "external_observation":
+        return "external_sensor"
+    if mode == "manual_confirmation":
+        return "manual"
+    if mode == "command_ack_only":
+        return "submitted_only"
+    return "unknown"
+
+
+def action_state_tracking_status(action: ActionConfig) -> StateTrackingStatus:
+    mode = action_verification_mode(action)
+    if mode == "ha_state":
+        return "tracked" if action.expected_effect is not None else "unsupported"
+    if mode == "external_observation":
+        return "external_required"
+    if mode == "manual_confirmation":
+        return "manual_required"
+    if mode == "command_ack_only":
+        return "ack_only"
+    return "unsupported"
+
+
+def action_public_expected_effect(action: ActionConfig) -> dict[str, str] | None:
+    if action_state_tracking_status(action) != "tracked":
+        return None
+    if action.expected_effect is None:
+        return None
+    return action.expected_effect.model_dump()

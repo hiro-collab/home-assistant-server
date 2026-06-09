@@ -21,13 +21,21 @@ Content-Type: application/json
 
 ## 状態確認
 
-`expected_effect` がある action について、Home Assistant の現在 state を読み取り専用で確認します。Home Assistant の URL や entity ID は返しません。
+`verification.mode: ha_state` かつ `expected_effect` がある action について、Home Assistant の現在 state を読み取り専用で確認します。Home Assistant の URL や entity ID は返しません。
+これは post-action / restore 後の確認です。実行前に使う場合は、現在 state がすでに
+その action の期待結果になっているかを読むだけなので、preflight の pass/fail と混同しないでください。
+実行前に state tracking 可能かを知りたい場合は、`GET /actions` の catalog で対象 action の
+`control_type`、`state_authority`、`verification_mode`、`state_tracking` を確認します。
+`tracked` 以外は HA state proof ではなく、外部観測、手動確認、または command acknowledgement
+だけの action です。
 
 - Method: `GET`
 - URL: `http://127.0.0.1:8787/actions/{{action_id}}/state`
 - Headers: `Authorization: Bearer {{HOME_CONTROL_API_TOKEN}}`
 
-応答は `action_id`、`expected_state`、`actual_state`、`status` だけを見て判定します。`status: "matched"` 以外は、実行 proof ではなく追加確認が必要な状態です。
+応答は `action_id`、`control_type`、`state_authority`、`verification_mode`、`state_tracking`、
+`expected_state`、`actual_state`、`status` を見て判定します。`status: "matched"` 以外は、
+実行 proof ではなく追加確認が必要な状態です。
 
 ## プレビュー
 

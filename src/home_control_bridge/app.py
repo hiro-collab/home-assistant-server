@@ -11,7 +11,19 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from .audit import JsonlAuditLogger
-from .config import ActionConfig, BridgeConfig, ConfigError, action_preview_payload, get_required_secret, load_config
+from .config import (
+    ActionConfig,
+    BridgeConfig,
+    ConfigError,
+    action_control_type,
+    action_preview_payload,
+    action_public_expected_effect,
+    action_state_authority,
+    action_state_tracking_status,
+    action_verification_mode,
+    get_required_secret,
+    load_config,
+)
 from .faults import FaultContext, FaultDecision, evaluate_fault
 from .home_assistant import HomeAssistantClient, HomeAssistantError
 from .schemas import ActionRequest, ActionResponse, ActionStateResponse, ActionSummary, HealthResponse
@@ -135,6 +147,11 @@ def create_app(
                 label=action.label,
                 confirm_required=action.confirm_required,
                 response_text=action.response_text,
+                control_type=action_control_type(action),
+                state_authority=action_state_authority(action),
+                verification_mode=action_verification_mode(action),
+                state_tracking=action_state_tracking_status(action),
+                verification=action.verification.model_dump() if action.verification is not None else None,
                 expected_effect=_expected_effect_payload(action),
             )
             for action_id, action in sorted(config.actions.items())
@@ -148,11 +165,14 @@ def create_app(
     async def get_action_state(action_id: str) -> ActionStateResponse:
         config = require_config()
         action = _get_action(config, action_id)
-        if action.expected_effect is None:
+        tracking_status = action_state_tracking_status(action)
+        tracking_fields = _state_tracking_summary_fields(action)
+        if tracking_status != "tracked":
             return ActionStateResponse(
                 ok=False,
                 action_id=action_id,
-                status="untracked",
+                status=tracking_status,
+                **tracking_fields,
             )
 
         expected_state = action.expected_effect.expected_state
@@ -164,6 +184,7 @@ def create_app(
                 action_id=action_id,
                 status="unavailable",
                 expected_state=expected_state,
+                **tracking_fields,
             )
 
         status = "matched" if actual_state == expected_state else "mismatch"
@@ -173,6 +194,7 @@ def create_app(
             status=status,
             expected_state=expected_state,
             actual_state=actual_state,
+            **tracking_fields,
         )
 
     @app.post(
@@ -913,14 +935,22 @@ def _utc_now_iso() -> str:
 
 
 def _expected_effect_payload(action: ActionConfig) -> dict[str, str] | None:
-    if action.expected_effect is None:
-        return None
-    return action.expected_effect.model_dump()
+    return action_public_expected_effect(action)
+
+
+def _state_tracking_summary_fields(action: ActionConfig) -> dict[str, str]:
+    return {
+        "control_type": action_control_type(action),
+        "state_authority": action_state_authority(action),
+        "verification_mode": action_verification_mode(action),
+        "state_tracking": action_state_tracking_status(action),
+    }
 
 
 def _response_tracking_fields(action: ActionConfig) -> dict[str, object]:
+    fields: dict[str, object] = _state_tracking_summary_fields(action)
     effect = _expected_effect_payload(action)
-    fields: dict[str, object] = {"expected_effect": effect}
+    fields["expected_effect"] = effect
     if effect is None:
         return fields
     fields.update(
@@ -941,10 +971,12 @@ def _optional_response_tracking_fields(action: ActionConfig | None) -> dict[str,
 
 
 def _expected_effect_audit_fields(action: ActionConfig) -> dict[str, object]:
+    fields: dict[str, object] = _state_tracking_summary_fields(action)
     effect = _expected_effect_payload(action)
     if effect is None:
-        return {}
-    return {"expected_effect": effect}
+        return fields
+    fields["expected_effect"] = effect
+    return fields
 
 
 def _audit(app: FastAPI, event: dict) -> None:

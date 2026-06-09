@@ -12,18 +12,74 @@ class ExpectedEffect(BaseModel):
     expected_state: str
 
 
+class Verification(BaseModel):
+    mode: Literal[
+        "ha_state",
+        "external_observation",
+        "command_ack_only",
+        "manual_confirmation",
+        "unsupported",
+    ]
+
+
 class ActionSummary(BaseModel):
     action_id: str
     label: str
     confirm_required: bool
     response_text: str
+    control_type: Literal[
+        "stateful_target",
+        "stateless_toggle",
+        "stateless_command",
+        "position_command",
+        "mode_command",
+        "job_command",
+        "script_wrapper",
+    ]
+    state_authority: Literal[
+        "ha_entity",
+        "ha_inferred",
+        "external_sensor",
+        "manual",
+        "open_loop",
+        "submitted_only",
+        "unknown",
+    ]
+    verification_mode: Literal[
+        "ha_state",
+        "external_observation",
+        "command_ack_only",
+        "manual_confirmation",
+        "unsupported",
+    ]
+    state_tracking: Literal[
+        "tracked",
+        "external_required",
+        "ack_only",
+        "manual_required",
+        "unsupported",
+    ]
+    verification: Verification | None = None
     expected_effect: ExpectedEffect | None = None
 
 
 class ActionStateResponse(BaseModel):
     ok: bool
     action_id: str
-    status: Literal["matched", "mismatch", "untracked", "unavailable"]
+    status: Literal[
+        "matched",
+        "mismatch",
+        "untracked",
+        "unavailable",
+        "external_required",
+        "ack_only",
+        "manual_required",
+        "unsupported",
+    ]
+    control_type: str | None = None
+    state_authority: str | None = None
+    verification_mode: str | None = None
+    state_tracking: str | None = None
     expected_state: str | None = None
     actual_state: str | None = None
 
@@ -61,6 +117,10 @@ class ActionResponse(BaseModel):
     service: str | None = None
     entity_id: str | None = None
     expected_state: str | None = None
+    control_type: str | None = None
+    state_authority: str | None = None
+    verification_mode: str | None = None
+    state_tracking: str | None = None
     expected_effect: ExpectedEffect | None = None
     confirmation_token: str | None = None
     preview: dict[str, Any] | None = None

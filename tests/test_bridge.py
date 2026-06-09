@@ -71,6 +71,9 @@ def config(tmp_path):
                     "ha_script": "script.demo_light_on",
                     "confirm_required": False,
                     "response_text": "照明をつけました。",
+                    "control_type": "stateful_target",
+                    "state_authority": "ha_entity",
+                    "verification": {"mode": "ha_state"},
                     "expected_effect": {
                         "domain": "light",
                         "service": "turn_on",
@@ -83,6 +86,9 @@ def config(tmp_path):
                     "ha_script": "script.curtain_close",
                     "confirm_required": True,
                     "response_text": "カーテンを閉めました。",
+                    "control_type": "position_command",
+                    "state_authority": "submitted_only",
+                    "verification": {"mode": "command_ack_only"},
                 },
             },
         }
@@ -161,6 +167,15 @@ def test_actions_returns_public_allowlist(config, token, tmp_path):
     actions = response.json()
     assert {action["action_id"] for action in actions} == {"light_on", "curtain_close"}
     assert all("ha_script" not in action for action in actions)
+    by_id = {action["action_id"]: action for action in actions}
+    assert by_id["light_on"]["control_type"] == "stateful_target"
+    assert by_id["light_on"]["state_authority"] == "ha_entity"
+    assert by_id["light_on"]["verification_mode"] == "ha_state"
+    assert by_id["light_on"]["state_tracking"] == "tracked"
+    assert by_id["curtain_close"]["control_type"] == "position_command"
+    assert by_id["curtain_close"]["state_authority"] == "submitted_only"
+    assert by_id["curtain_close"]["verification_mode"] == "command_ack_only"
+    assert by_id["curtain_close"]["state_tracking"] == "ack_only"
 
 
 def test_action_state_requires_api_token(config, token, tmp_path):
@@ -182,6 +197,10 @@ def test_action_state_returns_redacted_match(config, token, tmp_path):
         "ok": True,
         "action_id": "light_on",
         "status": "matched",
+        "control_type": "stateful_target",
+        "state_authority": "ha_entity",
+        "verification_mode": "ha_state",
+        "state_tracking": "tracked",
         "expected_state": "on",
         "actual_state": "on",
     }
@@ -204,7 +223,7 @@ def test_action_state_reports_mismatch_without_entity(config, token, tmp_path):
     assert "entity_id" not in body
 
 
-def test_action_state_untracked_action_does_not_call_home_assistant(config, token, tmp_path):
+def test_action_state_ack_only_action_does_not_call_home_assistant(config, token, tmp_path):
     client, ha, _, _ = make_client(config, token, tmp_path)
 
     response = client.get("/actions/curtain_close/state", headers=auth_headers(token))
@@ -213,7 +232,44 @@ def test_action_state_untracked_action_does_not_call_home_assistant(config, toke
     assert response.json() == {
         "ok": False,
         "action_id": "curtain_close",
-        "status": "untracked",
+        "status": "ack_only",
+        "control_type": "position_command",
+        "state_authority": "submitted_only",
+        "verification_mode": "command_ack_only",
+        "state_tracking": "ack_only",
+        "expected_state": None,
+        "actual_state": None,
+    }
+    assert ha.state_calls == []
+
+
+def test_external_observation_action_ignores_legacy_expected_effect(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"]["control_type"] = "stateless_toggle"
+    raw["actions"]["light_on"]["state_authority"] = "open_loop"
+    raw["actions"]["light_on"]["verification"] = {"mode": "external_observation"}
+    external_config = BridgeConfig.model_validate(raw)
+    client, ha, _, _ = make_client(external_config, token, tmp_path)
+
+    actions_response = client.get("/actions", headers=auth_headers(token))
+    action = next(action for action in actions_response.json() if action["action_id"] == "light_on")
+    assert action["control_type"] == "stateless_toggle"
+    assert action["state_authority"] == "open_loop"
+    assert action["verification_mode"] == "external_observation"
+    assert action["state_tracking"] == "external_required"
+    assert action["expected_effect"] is None
+
+    state_response = client.get("/actions/light_on/state", headers=auth_headers(token))
+
+    assert state_response.status_code == 200
+    assert state_response.json() == {
+        "ok": False,
+        "action_id": "light_on",
+        "status": "external_required",
+        "control_type": "stateless_toggle",
+        "state_authority": "open_loop",
+        "verification_mode": "external_observation",
+        "state_tracking": "external_required",
         "expected_state": None,
         "actual_state": None,
     }
@@ -290,6 +346,10 @@ def test_execute_returns_tracking_metadata_and_logs_it(config, token, tmp_path):
     assert body["service"] == "turn_on"
     assert body["entity_id"] == "light.demo_room"
     assert body["expected_state"] == "on"
+    assert body["control_type"] == "stateful_target"
+    assert body["state_authority"] == "ha_entity"
+    assert body["verification_mode"] == "ha_state"
+    assert body["state_tracking"] == "tracked"
     assert body["expected_effect"] == {
         "domain": "light",
         "service": "turn_on",
@@ -303,6 +363,10 @@ def test_execute_returns_tracking_metadata_and_logs_it(config, token, tmp_path):
     assert log["execution_id"] == body["execution_id"]
     assert log["issued_at"] == body["issued_at"]
     assert log["status"] == "submitted"
+    assert log["control_type"] == "stateful_target"
+    assert log["state_authority"] == "ha_entity"
+    assert log["verification_mode"] == "ha_state"
+    assert log["state_tracking"] == "tracked"
     assert log["expected_effect"] == body["expected_effect"]
 
 

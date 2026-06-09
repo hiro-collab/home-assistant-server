@@ -134,7 +134,7 @@ components:
           description: Always 0 on unauthenticated health responses; configured rule count is not disclosed.
     ActionSummary:
       type: object
-      required: [action_id, label, confirm_required, response_text]
+      required: [action_id, label, confirm_required, response_text, control_type, state_authority, verification_mode, state_tracking]
       properties:
         action_id:
           type: string
@@ -144,6 +144,25 @@ components:
           type: boolean
         response_text:
           type: string
+        control_type:
+          type: string
+          enum: [stateful_target, stateless_toggle, stateless_command, position_command, mode_command, job_command, script_wrapper]
+          description: Appliance/control behavior class.
+        state_authority:
+          type: string
+          enum: [ha_entity, ha_inferred, external_sensor, manual, open_loop, submitted_only, unknown]
+          description: Source of state authority. Inferred or open-loop state is not physical proof.
+        verification_mode:
+          type: string
+          enum: [ha_state, external_observation, command_ack_only, manual_confirmation, unsupported]
+          description: Proof layer expected for this action.
+        state_tracking:
+          type: string
+          enum: [tracked, external_required, ack_only, manual_required, unsupported]
+          description: Whether this action can produce Home Assistant state proof.
+        verification:
+          $ref: "#/components/schemas/Verification"
+          nullable: true
         expected_effect:
           $ref: "#/components/schemas/ExpectedEffect"
           nullable: true
@@ -178,7 +197,19 @@ components:
           type: string
         status:
           type: string
-          enum: [matched, mismatch, untracked, unavailable]
+          enum: [matched, mismatch, untracked, unavailable, external_required, ack_only, manual_required, unsupported]
+        control_type:
+          type: string
+          nullable: true
+        state_authority:
+          type: string
+          nullable: true
+        verification_mode:
+          type: string
+          nullable: true
+        state_tracking:
+          type: string
+          nullable: true
         expected_state:
           type: string
           nullable: true
@@ -234,6 +265,22 @@ components:
           type: string
           nullable: true
           description: Expected state configured for later observation correlation. This is not an observed label.
+        control_type:
+          type: string
+          nullable: true
+          description: Appliance/control behavior class.
+        state_authority:
+          type: string
+          nullable: true
+          description: Source of state authority. Inferred or open-loop state is not physical proof.
+        verification_mode:
+          type: string
+          nullable: true
+          description: Proof layer expected for this action.
+        state_tracking:
+          type: string
+          nullable: true
+          description: Whether this action can produce Home Assistant state proof.
         expected_effect:
           $ref: "#/components/schemas/ExpectedEffect"
           nullable: true
@@ -249,6 +296,13 @@ components:
           type: string
           nullable: true
           description: Generic error code. Internal Home Assistant details are not returned.
+    Verification:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [ha_state, external_observation, command_ack_only, manual_confirmation, unsupported]
     ExpectedEffect:
       type: object
       required: [domain, service, entity_id, expected_state]

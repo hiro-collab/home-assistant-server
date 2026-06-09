@@ -37,6 +37,10 @@ actions:
     ha_script: "script.demo_light_on"
     confirm_required: false
     response_text: "照明をつけました。"
+    control_type: "stateful_target"
+    state_authority: "ha_entity"
+    verification:
+      mode: "ha_state"
     expected_effect:
       domain: "light"
       service: "turn_on"
@@ -48,6 +52,10 @@ actions:
     ha_script: "script.demo_light_off"
     confirm_required: false
     response_text: "照明を消しました。"
+    control_type: "stateful_target"
+    state_authority: "ha_entity"
+    verification:
+      mode: "ha_state"
     expected_effect:
       domain: "light"
       service: "turn_off"
@@ -59,9 +67,17 @@ actions:
     ha_script: "script.curtain_close"
     confirm_required: true
     response_text: "カーテンを閉めました。"
+    control_type: "position_command"
+    state_authority: "submitted_only"
+    verification:
+      mode: "command_ack_only"
 
   projection_mode:
     label: "プロジェクションモードにする"
     ha_script: "script.projection_mode"
     confirm_required: true
     response_text: "プロジェクションモードにしました。"
+    control_type: "stateless_command"
+    state_authority: "submitted_only"
+    verification:
+      mode: "command_ack_only"
