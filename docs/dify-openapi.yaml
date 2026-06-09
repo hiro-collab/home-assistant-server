@@ -109,8 +109,10 @@ components:
       examples:
         light_on:
           value: light_on
-        curtain_close:
-          value: curtain_close
+        door_close:
+          value: door_close
+        vacuum_return:
+          value: vacuum_return
   schemas:
     HealthResponse:
       type: object

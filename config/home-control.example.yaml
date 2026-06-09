@@ -32,6 +32,13 @@ faults:
       message: "simulated confirmation required"
 
 actions:
+  # Standard appliance review universe:
+  # light_on, light_off, fan_on, fan_off, aircon_on, aircon_off,
+  # door_open, door_close, door_stop, vacuum_start, vacuum_return, vacuum_pause.
+  #
+  # Keep open-loop or command-only devices out of HA state proof. Promote an
+  # action to verification.mode: ha_state only after the target entity can be
+  # read back reliably and a ticketed execute/wait/CheckState pass proves it.
   light_on:
     label: "照明をつける"
     ha_script: "script.demo_light_on"
@@ -41,11 +48,6 @@ actions:
     state_authority: "open_loop"
     verification:
       mode: "external_observation"
-    expected_effect:
-      domain: "light"
-      service: "turn_on"
-      entity_id: "light.demo_room"
-      expected_state: "on"
 
   light_off:
     label: "照明を消す"
@@ -56,17 +58,62 @@ actions:
     state_authority: "open_loop"
     verification:
       mode: "external_observation"
-    expected_effect:
-      domain: "light"
-      service: "turn_off"
-      entity_id: "light.demo_room"
-      expected_state: "off"
 
-  curtain_close:
-    label: "カーテンを閉める"
-    ha_script: "script.curtain_close"
+  fan_on:
+    label: "扇風機をつける"
+    ha_script: "script.demo_fan_on"
+    confirm_required: false
+    response_text: "扇風機をつける操作を送信しました。実際の稼働状態は外部観測で確認してください。"
+    control_type: "stateless_command"
+    state_authority: "submitted_only"
+    verification:
+      mode: "command_ack_only"
+
+  fan_off:
+    label: "扇風機を止める"
+    ha_script: "script.demo_fan_off"
+    confirm_required: false
+    response_text: "扇風機を止める操作を送信しました。実際の停止状態は外部観測で確認してください。"
+    control_type: "stateless_command"
+    state_authority: "submitted_only"
+    verification:
+      mode: "command_ack_only"
+
+  aircon_on:
+    label: "エアコンをつける"
+    ha_script: "script.demo_aircon_on"
     confirm_required: true
-    response_text: "カーテンを閉めました。"
+    response_text: "エアコンをつける操作を送信しました。実際の空調状態は外部観測で確認してください。"
+    control_type: "stateless_command"
+    state_authority: "submitted_only"
+    verification:
+      mode: "command_ack_only"
+
+  aircon_off:
+    label: "エアコンを止める"
+    ha_script: "script.demo_aircon_off"
+    confirm_required: true
+    response_text: "エアコンを止める操作を送信しました。実際の空調状態は外部観測で確認してください。"
+    control_type: "stateless_command"
+    state_authority: "submitted_only"
+    verification:
+      mode: "command_ack_only"
+
+  door_open:
+    label: "カーテンを開ける"
+    ha_script: "script.demo_door_open"
+    confirm_required: true
+    response_text: "カーテンを開ける操作を送信しました。開き切ったかは位置観測で確認してください。"
+    control_type: "position_command"
+    state_authority: "submitted_only"
+    verification:
+      mode: "command_ack_only"
+
+  door_close:
+    label: "カーテンを閉める"
+    ha_script: "script.demo_door_close"
+    confirm_required: true
+    response_text: "カーテンを閉める操作を送信しました。閉まり切ったかは位置観測で確認してください。"
     control_type: "position_command"
     state_authority: "submitted_only"
     verification:
@@ -95,6 +142,26 @@ actions:
     # Open/restore proof should use a separate action with expected_state:
     # "open" and position.min such as 95 after the local device is reviewed.
 
+  door_stop:
+    label: "カーテンを止める"
+    ha_script: "script.demo_door_stop"
+    confirm_required: true
+    response_text: "カーテンを止める操作を送信しました。停止状態は外部観測で確認してください。"
+    control_type: "position_command"
+    state_authority: "submitted_only"
+    verification:
+      mode: "command_ack_only"
+
+  vacuum_start:
+    label: "掃除機を開始する"
+    ha_script: "script.demo_vacuum_start"
+    confirm_required: true
+    response_text: "掃除機を開始する操作を送信しました。実際の移動や清掃状態は外部観測で確認してください。"
+    control_type: "job_command"
+    state_authority: "submitted_only"
+    verification:
+      mode: "command_ack_only"
+
   vacuum_return:
     label: "掃除機を充電台に戻す"
     ha_script: "script.demo_vacuum_return"
@@ -115,10 +182,21 @@ actions:
       entity_id: "vacuum.demo_cloud_target"
       expected_state: "docked"
 
-  # Demo-only air conditioner candidates. Do not add expected_effect to an
-  # unknown switch wrapper just to make CheckState green. If a same-device
-  # climate entity is available, keep the service call inside a Home Assistant
-  # script and track the climate entity as a separate mode_command action.
+  vacuum_pause:
+    label: "掃除機を一時停止する"
+    ha_script: "script.demo_vacuum_pause"
+    confirm_required: true
+    response_text: "掃除機を一時停止する操作を送信しました。実際の停止状態は外部観測で確認してください。"
+    control_type: "job_command"
+    state_authority: "submitted_only"
+    verification:
+      mode: "command_ack_only"
+
+  # Demo-only air conditioner candidates, separate from the twelve standard
+  # appliance actions above. Do not add expected_effect to an unknown switch
+  # wrapper just to make CheckState green. If a same-device climate entity is
+  # available, keep the service call inside a Home Assistant script and track
+  # the climate entity as a separate mode_command action.
   aircon_cool:
     label: "エアコンを冷房にする"
     ha_script: "script.demo_aircon_cool"
@@ -155,6 +233,7 @@ actions:
       entity_id: "climate.demo_aircon"
       expected_state: "off"
 
+  # Demo-only scene/display action, not part of appliance state proof.
   projection_mode:
     label: "プロジェクションモードにする"
     ha_script: "script.projection_mode"

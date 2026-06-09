@@ -159,10 +159,65 @@ def read_logs(log_path):
     return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
 
 
-def test_example_config_loads_with_demo_climate_aircon_actions():
+def test_example_config_loads_with_standard_appliance_actions_and_demo_climate_candidates():
     config_path = Path(__file__).resolve().parents[1] / "config" / "home-control.example.yaml"
 
     loaded = load_config(config_path)
+
+    standard_actions = {
+        "light_on",
+        "light_off",
+        "fan_on",
+        "fan_off",
+        "aircon_on",
+        "aircon_off",
+        "door_open",
+        "door_close",
+        "door_stop",
+        "vacuum_start",
+        "vacuum_return",
+        "vacuum_pause",
+    }
+    assert standard_actions.issubset(loaded.actions)
+
+    assert loaded.actions["light_on"].control_type == "stateless_toggle"
+    assert loaded.actions["light_on"].state_authority == "open_loop"
+    assert loaded.actions["light_on"].verification is not None
+    assert loaded.actions["light_on"].verification.mode == "external_observation"
+    assert loaded.actions["light_on"].expected_effect is None
+    assert loaded.actions["light_off"].control_type == "stateless_toggle"
+    assert loaded.actions["light_off"].expected_effect is None
+
+    for action_id in ("fan_on", "fan_off", "aircon_on", "aircon_off"):
+        action = loaded.actions[action_id]
+        assert action.control_type == "stateless_command"
+        assert action.state_authority == "submitted_only"
+        assert action.verification is not None
+        assert action.verification.mode == "command_ack_only"
+        assert action.expected_effect is None
+
+    for action_id in ("door_open", "door_close", "door_stop"):
+        action = loaded.actions[action_id]
+        assert action.control_type == "position_command"
+        assert action.state_authority == "submitted_only"
+        assert action.verification is not None
+        assert action.verification.mode == "command_ack_only"
+        assert action.expected_effect is None
+
+    for action_id in ("vacuum_start", "vacuum_pause"):
+        action = loaded.actions[action_id]
+        assert action.control_type == "job_command"
+        assert action.state_authority == "submitted_only"
+        assert action.verification is not None
+        assert action.verification.mode == "command_ack_only"
+        assert action.expected_effect is None
+
+    assert loaded.actions["vacuum_return"].control_type == "job_command"
+    assert loaded.actions["vacuum_return"].state_authority == "ha_entity"
+    assert loaded.actions["vacuum_return"].verification is not None
+    assert loaded.actions["vacuum_return"].verification.mode == "ha_state"
+    assert loaded.actions["vacuum_return"].expected_effect is not None
+    assert loaded.actions["vacuum_return"].expected_effect.expected_state == "docked"
 
     assert loaded.actions["aircon_cool"].control_type == "mode_command"
     assert loaded.actions["aircon_cool"].verification is not None

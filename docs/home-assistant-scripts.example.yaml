@@ -18,13 +18,85 @@ script:
         target:
           entity_id: light.living_room
 
-  curtain_close:
-    alias: Close curtain
+  demo_fan_on:
+    alias: Demo - fan on
+    mode: single
+    sequence:
+      - service: fan.turn_on
+        target:
+          entity_id: fan.living_room
+
+  demo_fan_off:
+    alias: Demo - fan off
+    mode: single
+    sequence:
+      - service: fan.turn_off
+        target:
+          entity_id: fan.living_room
+
+  demo_aircon_on:
+    alias: Demo - aircon on
+    mode: single
+    sequence:
+      - service: switch.turn_on
+        target:
+          entity_id: switch.aircon_remote
+
+  demo_aircon_off:
+    alias: Demo - aircon off
+    mode: single
+    sequence:
+      - service: switch.turn_off
+        target:
+          entity_id: switch.aircon_remote
+
+  demo_door_open:
+    alias: Demo - door open
+    mode: single
+    sequence:
+      - service: cover.open_cover
+        target:
+          entity_id: cover.living_room_curtain
+
+  demo_door_close:
+    alias: Demo - door close
     mode: single
     sequence:
       - service: cover.close_cover
         target:
           entity_id: cover.living_room_curtain
+
+  demo_door_stop:
+    alias: Demo - door stop
+    mode: single
+    sequence:
+      - service: cover.stop_cover
+        target:
+          entity_id: cover.living_room_curtain
+
+  demo_vacuum_start:
+    alias: Demo - vacuum start
+    mode: single
+    sequence:
+      - service: vacuum.start
+        target:
+          entity_id: vacuum.demo_cloud_target
+
+  demo_vacuum_return:
+    alias: Demo - vacuum return
+    mode: single
+    sequence:
+      - service: vacuum.return_to_base
+        target:
+          entity_id: vacuum.demo_cloud_target
+
+  demo_vacuum_pause:
+    alias: Demo - vacuum pause
+    mode: single
+    sequence:
+      - service: vacuum.pause
+        target:
+          entity_id: vacuum.demo_cloud_target
 
   demo_aircon_cool:
     alias: Demo - aircon cool
