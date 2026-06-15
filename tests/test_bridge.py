@@ -202,28 +202,57 @@ def test_example_config_loads_with_standard_appliance_actions_and_demo_climate_c
         assert action.verification.mode == "command_ack_only"
         assert action.expected_effect is None
 
-    for action_id in ("door_open", "door_close", "door_stop"):
+    for action_id in ("door_open", "door_close"):
         action = loaded.actions[action_id]
         assert action.control_type == "position_command"
-        assert action.state_authority == "submitted_only"
+        assert action.state_authority == "ha_entity"
         assert action.verification is not None
-        assert action.verification.mode == "command_ack_only"
-        assert action.expected_effect is None
+        assert action.verification.mode == "ha_state"
+        assert action.verification.position is not None
+        assert action.expected_effect is not None
+        assert action.expected_effect.domain == "cover"
+
+        payload = action_preview_payload(action_id, action)
+        assert payload["proof_ceiling"] == "ha_visible_cover_position_checkstate_layer"
+        assert payload["live_test_candidate"] is True
+        assert payload["live_test_readiness"] == "do_not_test_current_config"
+        assert "safety_requirement:obstruction_clearance" in payload["live_test_blockers"]
+        assert "safety_requirement:original_position_restore" in payload["live_test_blockers"]
+
+    door_stop = loaded.actions["door_stop"]
+    assert door_stop.control_type == "position_command"
+    assert door_stop.state_authority == "submitted_only"
+    assert door_stop.verification is not None
+    assert door_stop.verification.mode == "command_ack_only"
+    assert door_stop.expected_effect is None
 
     for action_id in ("vacuum_start", "vacuum_pause"):
         action = loaded.actions[action_id]
         assert action.control_type == "job_command"
-        assert action.state_authority == "submitted_only"
+        assert action.state_authority == "ha_entity"
         assert action.verification is not None
-        assert action.verification.mode == "command_ack_only"
-        assert action.expected_effect is None
+        assert action.verification.mode == "ha_state"
+        assert action.expected_effect is not None
+        assert action.expected_effect.domain == "vacuum"
+        assert action.restore_action_id == "vacuum_return"
+
+        payload = action_preview_payload(action_id, action)
+        assert payload["proof_ceiling"] == "ha_visible_vacuum_state_checkstate_layer"
+        assert payload["live_test_candidate"] is True
+        assert payload["live_test_readiness"] == "do_not_test_current_config"
+        assert payload["live_test_blockers"]
 
     assert loaded.actions["vacuum_return"].control_type == "job_command"
     assert loaded.actions["vacuum_return"].state_authority == "ha_entity"
+    assert loaded.actions["vacuum_return"].live_test_candidate is True
+    assert loaded.actions["vacuum_return"].terminal_action is True
     assert loaded.actions["vacuum_return"].verification is not None
     assert loaded.actions["vacuum_return"].verification.mode == "ha_state"
     assert loaded.actions["vacuum_return"].expected_effect is not None
     assert loaded.actions["vacuum_return"].expected_effect.expected_state == "docked"
+    vacuum_return_payload = action_preview_payload("vacuum_return", loaded.actions["vacuum_return"])
+    assert vacuum_return_payload["live_test_readiness"] == "test_now"
+    assert vacuum_return_payload["live_test_blockers"] == []
 
     assert loaded.actions["aircon_cool"].control_type == "mode_command"
     assert loaded.actions["aircon_cool"].verification is not None
@@ -233,6 +262,35 @@ def test_example_config_loads_with_standard_appliance_actions_and_demo_climate_c
     assert loaded.actions["aircon_cool"].expected_effect.service == "set_hvac_mode"
     assert loaded.actions["aircon_hvac_off"].expected_effect is not None
     assert loaded.actions["aircon_hvac_off"].expected_effect.expected_state == "off"
+
+    projection_payload = action_preview_payload("projection_mode", loaded.actions["projection_mode"])
+    assert projection_payload["proof_ceiling"] == "not_home_control_appliance_coverage_row"
+    assert projection_payload["live_test_candidate"] is False
+    assert projection_payload["live_test_readiness"] == "not_live_test_candidate"
+
+
+def test_example_config_live_readiness_classes_are_source_reproducible():
+    config_path = Path(__file__).resolve().parents[1] / "config" / "home-control.example.yaml"
+
+    loaded = load_config(config_path)
+
+    door_open_payload = action_preview_payload("door_open", loaded.actions["door_open"])
+    assert door_open_payload["proof_ceiling"] == "ha_visible_cover_position_checkstate_layer"
+    assert door_open_payload["live_test_readiness"] == "do_not_test_current_config"
+    assert "safety_requirement:obstruction_clearance" in door_open_payload["live_test_blockers"]
+
+    vacuum_start_payload = action_preview_payload("vacuum_start", loaded.actions["vacuum_start"])
+    assert vacuum_start_payload["proof_ceiling"] == "ha_visible_vacuum_state_checkstate_layer"
+    assert vacuum_start_payload["live_test_readiness"] == "do_not_test_current_config"
+    assert "safety_requirement:path_floor_safety" in vacuum_start_payload["live_test_blockers"]
+
+    vacuum_return_payload = action_preview_payload("vacuum_return", loaded.actions["vacuum_return"])
+    assert vacuum_return_payload["proof_ceiling"] == "ha_visible_vacuum_return_checkstate_layer"
+    assert vacuum_return_payload["live_test_readiness"] == "test_now"
+
+    projection_payload = action_preview_payload("projection_mode", loaded.actions["projection_mode"])
+    assert projection_payload["proof_ceiling"] == "not_home_control_appliance_coverage_row"
+    assert projection_payload["live_test_readiness"] == "not_live_test_candidate"
 
 
 def test_health_is_available_without_bridge_token(config, token, tmp_path):
@@ -288,10 +346,20 @@ def test_actions_returns_public_allowlist(config, token, tmp_path):
     assert by_id["light_on"]["state_authority"] == "ha_entity"
     assert by_id["light_on"]["verification_mode"] == "ha_state"
     assert by_id["light_on"]["state_tracking"] == "tracked"
+    assert by_id["light_on"]["proof_ceiling"] == "ha_visible_state_checkstate_layer"
+    assert by_id["light_on"]["live_test_candidate"] is False
+    assert by_id["light_on"]["live_test_readiness"] == "not_live_test_candidate"
+    assert by_id["light_on"]["live_test_blockers"] == ["not_marked_live_test_candidate"]
     assert by_id["curtain_close"]["control_type"] == "position_command"
     assert by_id["curtain_close"]["state_authority"] == "submitted_only"
     assert by_id["curtain_close"]["verification_mode"] == "command_ack_only"
     assert by_id["curtain_close"]["state_tracking"] == "ack_only"
+    assert by_id["curtain_close"]["proof_ceiling"] == "command_ack_only"
+    assert by_id["curtain_close"]["live_test_readiness"] == "not_live_test_candidate"
+    assert by_id["curtain_close"]["live_test_blockers"] == [
+        "not_marked_live_test_candidate",
+        "missing_ha_visible_success_criterion",
+    ]
 
 
 def test_action_state_requires_api_token(config, token, tmp_path):
@@ -707,6 +775,10 @@ def test_execute_returns_tracking_metadata_and_logs_it(config, token, tmp_path):
     assert body["state_authority"] == "ha_entity"
     assert body["verification_mode"] == "ha_state"
     assert body["state_tracking"] == "tracked"
+    assert body["proof_ceiling"] == "ha_visible_state_checkstate_layer"
+    assert body["live_test_candidate"] is False
+    assert body["live_test_readiness"] == "not_live_test_candidate"
+    assert body["live_test_blockers"] == ["not_marked_live_test_candidate"]
     assert body["expected_effect"] == {
         "domain": "light",
         "service": "turn_on",
@@ -1395,6 +1467,37 @@ def test_config_rejects_position_proof_without_ha_state_mode(config):
 
     with pytest.raises(ValidationError):
         BridgeConfig.model_validate(raw)
+
+
+def test_config_rejects_unknown_restore_or_stop_action_refs(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"]["restore_action_id"] = "missing_action"
+
+    with pytest.raises(ValidationError):
+        BridgeConfig.model_validate(raw)
+
+
+def test_live_readiness_blocks_candidate_without_restore_or_stop(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"]["live_test_candidate"] = True
+
+    loaded = BridgeConfig.model_validate(raw)
+    payload = action_preview_payload("light_on", loaded.actions["light_on"])
+
+    assert payload["live_test_readiness"] == "do_not_test_current_config"
+    assert payload["live_test_blockers"] == ["missing_restore_or_stop"]
+
+
+def test_terminal_action_with_ha_state_can_be_live_test_candidate(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"]["live_test_candidate"] = True
+    raw["actions"]["light_on"]["terminal_action"] = True
+
+    loaded = BridgeConfig.model_validate(raw)
+    payload = action_preview_payload("light_on", loaded.actions["light_on"])
+
+    assert payload["live_test_readiness"] == "test_now"
+    assert payload["live_test_blockers"] == []
 
 
 def test_placeholder_bridge_token_is_rejected(monkeypatch):

@@ -85,10 +85,24 @@ authority is proven:
 | light on/off | `switch:unknown` | `stateless_toggle`, `open_loop`, `external_observation` | External sensor/camera/manual proof only |
 | fan on/off | `switch:unknown` | `stateless_command`, `submitted_only`, `command_ack_only` | External observation if needed |
 | aircon on/off | `switch:unknown`; a same-device `climate` candidate exists | `stateless_command`, `submitted_only`, `command_ack_only` | `mode_command` only after the climate service path is designed and proven |
-| door open/close | `cover:open` with position changes observed | `position_command`, `submitted_only`, `command_ack_only` | Position-aware proof required before `ha_state`; open/closed state alone was not enough |
+| door open/close | SwitchBot-style `cover` position can be readable when locally bound | `position_command`, `ha_entity`, `ha_state`, `verification.position` when bound; otherwise command-only | Position-aware proof can support HA-visible position only; live movement still requires obstruction and restore/original-position gates |
 | door stop | transient cover command | `position_command`, `submitted_only`, `command_ack_only` | External/manual confirmation, not simple HA state proof |
-| vacuum return | target cloud-side vacuum entity `docked`; separate local vacuum entity also exists | `job_command`, target-specific `ha_entity`, `ha_state` after local config promotion | Check only the script target; report retry if the first wait does not reach `docked` |
-| vacuum start/pause | job state uncertain | `job_command`, `submitted_only`, `command_ack_only` | Accepted states and settle/timeout windows required first |
+| vacuum return | target cloud-side vacuum entity `docked`; separate local vacuum entity also exists | `job_command`, target-specific `ha_entity`, `ha_state`, `terminal_action` after local config promotion | Check only the script target; report retry if the first wait does not reach `docked` |
+| vacuum start/pause | vacuum state can be readable when locally bound | `job_command`, `ha_entity`, `ha_state` when bound | Still not live-ready until path/floor safety, active-task context, and return/cleanup gates are present |
+
+Catalog / preview expose live-readiness fields so clients do not have to infer
+this from labels:
+
+- `proof_ceiling` names the strongest allowed proof layer.
+- `live_test_candidate` marks rows that belong to a bounded review plan.
+- `live_test_readiness` is `test_now`, `do_not_test_current_config`, or
+  `not_live_test_candidate`.
+- `live_test_blockers` must name missing success, restore/stop, or safety gates.
+- `restore_action_id`, `stop_action_id`, and `terminal_action` describe how the
+  review plan can stop or restore the appliance without guessing.
+- `safety_requirements` are user/physical-world gates such as obstruction,
+  floor/path safety, or active-task context. They are not satisfied merely
+  because Home Assistant state is readable.
 
 External observation candidates stay outside HA state proof until the named
 route is separately designed and proven:

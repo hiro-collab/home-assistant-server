@@ -20,7 +20,10 @@ from .config import (
     ConfigError,
     action_control_type,
     action_expected_states,
+    action_live_test_blockers,
+    action_live_test_readiness,
     action_preview_payload,
+    action_proof_ceiling,
     action_public_expected_effect,
     action_public_position_proof,
     action_settle_seconds,
@@ -173,6 +176,14 @@ def create_app(
                 expected_states=action_expected_states(action),
                 settle_seconds=action_settle_seconds(action),
                 timeout_seconds=action_timeout_seconds(action),
+                proof_ceiling=action_proof_ceiling(action),
+                live_test_candidate=action.live_test_candidate,
+                live_test_readiness=action_live_test_readiness(action),
+                live_test_blockers=action_live_test_blockers(action),
+                restore_action_id=action.restore_action_id,
+                stop_action_id=action.stop_action_id,
+                terminal_action=action.terminal_action,
+                safety_requirements=list(action.safety_requirements),
             )
             for action_id, action in sorted(config.actions.items())
         ]
@@ -1025,6 +1036,14 @@ def _response_tracking_fields(action: ActionConfig) -> dict[str, object]:
     fields["settle_seconds"] = action_settle_seconds(action)
     fields["timeout_seconds"] = action_timeout_seconds(action)
     fields["position_proof"] = _position_proof_payload(action)
+    fields["proof_ceiling"] = action_proof_ceiling(action)
+    fields["live_test_candidate"] = action.live_test_candidate
+    fields["live_test_readiness"] = action_live_test_readiness(action)
+    fields["live_test_blockers"] = action_live_test_blockers(action)
+    fields["restore_action_id"] = action.restore_action_id
+    fields["stop_action_id"] = action.stop_action_id
+    fields["terminal_action"] = action.terminal_action
+    fields["safety_requirements"] = list(action.safety_requirements)
     effect = _expected_effect_payload(action)
     fields["expected_effect"] = effect
     if effect is None:

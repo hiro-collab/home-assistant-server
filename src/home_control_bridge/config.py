@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 ACTION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_:-]{0,79}$")
 ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 HA_SCRIPT_RE = re.compile(r"^script\.[a-z0-9_]+$")
+PUBLIC_CLASS_RE = re.compile(r"^[a-z0-9][a-z0-9_:-]{0,119}$")
 NESTED_REGEX_QUANTIFIER_RE = re.compile(r"\([^)]*[+*{][^)]*\)\s*[+*{]")
 REGEX_BACKREFERENCE_RE = re.compile(r"\\[1-9]")
 PLACEHOLDER_SECRET_PREFIXES = ("change-me", "replace", "example", "dummy")
@@ -266,6 +267,12 @@ class ActionConfig(BaseModel):
     state_authority: StateAuthority | None = None
     verification: VerificationConfig | None = None
     expected_effect: ExpectedEffectConfig | None = None
+    live_test_candidate: bool = False
+    restore_action_id: str | None = Field(default=None, max_length=80)
+    stop_action_id: str | None = Field(default=None, max_length=80)
+    terminal_action: bool = False
+    safety_requirements: list[str] = Field(default_factory=list, max_length=12)
+    proof_ceiling: str | None = Field(default=None, max_length=120)
 
     @field_validator("ha_script")
     @classmethod
@@ -273,6 +280,42 @@ class ActionConfig(BaseModel):
         value = value.strip()
         if not HA_SCRIPT_RE.match(value):
             raise ValueError("ha_script must be a Home Assistant script entity such as script.demo_light_on")
+        return value
+
+    @field_validator("restore_action_id", "stop_action_id")
+    @classmethod
+    def validate_optional_action_ref(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        if not ACTION_ID_RE.match(value):
+            raise ValueError("action references must be valid action_id values")
+        return value
+
+    @field_validator("safety_requirements")
+    @classmethod
+    def normalize_safety_requirements(cls, value: list[str]) -> list[str]:
+        requirements: list[str] = []
+        for item in value:
+            requirement = item.strip()
+            if not PUBLIC_CLASS_RE.match(requirement):
+                raise ValueError("safety_requirements entries must be public lowercase class labels")
+            if requirement not in requirements:
+                requirements.append(requirement)
+        return requirements
+
+    @field_validator("proof_ceiling")
+    @classmethod
+    def normalize_proof_ceiling(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        if not PUBLIC_CLASS_RE.match(value):
+            raise ValueError("proof_ceiling must be a public lowercase class label")
         return value
 
 
@@ -292,6 +335,19 @@ class BridgeConfig(BaseModel):
             if not ACTION_ID_RE.match(action_id):
                 raise ValueError(f"invalid action_id: {action_id!r}")
         return value
+
+    @model_validator(mode="after")
+    def validate_action_references(self):
+        for action_id, action in self.actions.items():
+            for ref_name in ("restore_action_id", "stop_action_id"):
+                ref = getattr(action, ref_name)
+                if ref is None:
+                    continue
+                if ref not in self.actions:
+                    raise ValueError(f"{action_id}.{ref_name} references unknown action_id: {ref}")
+                if ref == action_id:
+                    raise ValueError(f"{action_id}.{ref_name} must not reference itself")
+        return self
 
 
 def load_config(path: str | Path | None = None) -> BridgeConfig:
@@ -361,6 +417,14 @@ def action_preview_payload(action_id: str, action: ActionConfig) -> dict[str, An
         "expected_states": action_expected_states(action),
         "settle_seconds": action_settle_seconds(action),
         "timeout_seconds": action_timeout_seconds(action),
+        "proof_ceiling": action_proof_ceiling(action),
+        "live_test_candidate": action.live_test_candidate,
+        "live_test_readiness": action_live_test_readiness(action),
+        "live_test_blockers": action_live_test_blockers(action),
+        "restore_action_id": action.restore_action_id,
+        "stop_action_id": action.stop_action_id,
+        "terminal_action": action.terminal_action,
+        "safety_requirements": list(action.safety_requirements),
     }
     effect = action_public_expected_effect(action)
     if effect is not None:
@@ -456,3 +520,48 @@ def action_timeout_seconds(action: ActionConfig) -> float:
     if action.verification is None:
         return 0.0
     return action.verification.timeout_seconds
+
+
+def action_proof_ceiling(action: ActionConfig) -> str:
+    if action.proof_ceiling is not None:
+        return action.proof_ceiling
+
+    mode = action_verification_mode(action)
+    if mode == "ha_state" and action_state_tracking_status(action) == "tracked":
+        if action_public_position_proof(action) is not None:
+            return "ha_visible_position_checkstate_layer"
+        return "ha_visible_state_checkstate_layer"
+    if mode == "external_observation":
+        return "external_observation_required"
+    if mode == "manual_confirmation":
+        return "manual_confirmation_required"
+    if mode == "command_ack_only":
+        return "command_ack_only"
+    return "unsupported"
+
+
+def action_live_test_readiness(action: ActionConfig) -> str:
+    if action.live_test_candidate and not action_live_test_blockers(action):
+        return "test_now"
+    if not action.live_test_candidate:
+        return "not_live_test_candidate"
+    return "do_not_test_current_config"
+
+
+def action_live_test_blockers(action: ActionConfig) -> list[str]:
+    blockers: list[str] = []
+
+    if not action.live_test_candidate:
+        blockers.append("not_marked_live_test_candidate")
+
+    if action_state_tracking_status(action) != "tracked":
+        blockers.append("missing_ha_visible_success_criterion")
+
+    if action.live_test_candidate and not action.terminal_action:
+        if action.restore_action_id is None and action.stop_action_id is None:
+            blockers.append("missing_restore_or_stop")
+
+    for requirement in action.safety_requirements:
+        blockers.append(f"safety_requirement:{requirement}")
+
+    return blockers

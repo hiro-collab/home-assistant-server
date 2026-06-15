@@ -103,44 +103,57 @@ actions:
     label: "カーテンを開ける"
     ha_script: "script.demo_door_open"
     confirm_required: true
-    response_text: "カーテンを開ける操作を送信しました。開き切ったかは位置観測で確認してください。"
+    response_text: "カーテンを開ける操作を送信しました。HA の位置状態を確認してください。"
     control_type: "position_command"
-    state_authority: "submitted_only"
+    state_authority: "ha_entity"
+    live_test_candidate: true
+    restore_action_id: "door_close"
+    stop_action_id: "door_stop"
+    safety_requirements:
+      - "obstruction_clearance"
+      - "original_position_restore"
+    proof_ceiling: "ha_visible_cover_position_checkstate_layer"
     verification:
-      mode: "command_ack_only"
+      mode: "ha_state"
+      accepted_states: ["open"]
+      settle_seconds: 8
+      timeout_seconds: 60
+      position:
+        attribute: "current_position"
+        min: 95
+    expected_effect:
+      domain: "cover"
+      service: "open_cover"
+      entity_id: "cover.demo_curtain"
+      expected_state: "open"
 
   door_close:
     label: "カーテンを閉める"
     ha_script: "script.demo_door_close"
     confirm_required: true
-    response_text: "カーテンを閉める操作を送信しました。閉まり切ったかは位置観測で確認してください。"
+    response_text: "カーテンを閉める操作を送信しました。HA の位置状態を確認してください。"
     control_type: "position_command"
-    state_authority: "submitted_only"
+    state_authority: "ha_entity"
+    live_test_candidate: true
+    restore_action_id: "door_open"
+    stop_action_id: "door_stop"
+    safety_requirements:
+      - "obstruction_clearance"
+      - "original_position_restore"
+    proof_ceiling: "ha_visible_cover_position_checkstate_layer"
     verification:
-      mode: "command_ack_only"
-
-    # If a later read-only review and ticketed execute/wait proof show this
-    # cover entity reports stable state plus current_position, switch to a
-    # position-aware post-state check. Closed proof should require both the
-    # expected state and current_position below a conservative threshold:
-    #
-    # state_authority: "ha_entity"
-    # verification:
-    #   mode: "ha_state"
-    #   accepted_states: ["closed"]
-    #   settle_seconds: 8
-    #   timeout_seconds: 60
-    #   position:
-    #     attribute: "current_position"
-    #     max: 5
-    # expected_effect:
-    #   domain: "cover"
-    #   service: "close_cover"
-    #   entity_id: "cover.demo_curtain"
-    #   expected_state: "closed"
-    #
-    # Open/restore proof should use a separate action with expected_state:
-    # "open" and position.min such as 95 after the local device is reviewed.
+      mode: "ha_state"
+      accepted_states: ["closed"]
+      settle_seconds: 8
+      timeout_seconds: 60
+      position:
+        attribute: "current_position"
+        max: 5
+    expected_effect:
+      domain: "cover"
+      service: "close_cover"
+      entity_id: "cover.demo_curtain"
+      expected_state: "closed"
 
   door_stop:
     label: "カーテンを止める"
@@ -149,6 +162,7 @@ actions:
     response_text: "カーテンを止める操作を送信しました。停止状態は外部観測で確認してください。"
     control_type: "position_command"
     state_authority: "submitted_only"
+    proof_ceiling: "command_ack_only"
     verification:
       mode: "command_ack_only"
 
@@ -156,11 +170,24 @@ actions:
     label: "掃除機を開始する"
     ha_script: "script.demo_vacuum_start"
     confirm_required: true
-    response_text: "掃除機を開始する操作を送信しました。実際の移動や清掃状態は外部観測で確認してください。"
+    response_text: "掃除機を開始する操作を送信しました。HA の掃除機状態を確認してください。"
     control_type: "job_command"
-    state_authority: "submitted_only"
+    state_authority: "ha_entity"
+    live_test_candidate: true
+    restore_action_id: "vacuum_return"
+    safety_requirements:
+      - "path_floor_safety"
+    proof_ceiling: "ha_visible_vacuum_state_checkstate_layer"
     verification:
-      mode: "command_ack_only"
+      mode: "ha_state"
+      accepted_states: ["cleaning"]
+      settle_seconds: 10
+      timeout_seconds: 75
+    expected_effect:
+      domain: "vacuum"
+      service: "start"
+      entity_id: "vacuum.demo_cloud_target"
+      expected_state: "cleaning"
 
   vacuum_return:
     label: "掃除機を充電台に戻す"
@@ -169,6 +196,9 @@ actions:
     response_text: "掃除機を充電台に戻しました。"
     control_type: "job_command"
     state_authority: "ha_entity"
+    live_test_candidate: true
+    terminal_action: true
+    proof_ceiling: "ha_visible_vacuum_return_checkstate_layer"
     verification:
       mode: "ha_state"
       accepted_states: ["docked"]
@@ -186,11 +216,25 @@ actions:
     label: "掃除機を一時停止する"
     ha_script: "script.demo_vacuum_pause"
     confirm_required: true
-    response_text: "掃除機を一時停止する操作を送信しました。実際の停止状態は外部観測で確認してください。"
+    response_text: "掃除機を一時停止する操作を送信しました。HA の掃除機状態を確認してください。"
     control_type: "job_command"
-    state_authority: "submitted_only"
+    state_authority: "ha_entity"
+    live_test_candidate: true
+    restore_action_id: "vacuum_return"
+    safety_requirements:
+      - "active_task_context"
+      - "return_cleanup"
+    proof_ceiling: "ha_visible_vacuum_state_checkstate_layer"
     verification:
-      mode: "command_ack_only"
+      mode: "ha_state"
+      accepted_states: ["paused"]
+      settle_seconds: 5
+      timeout_seconds: 60
+    expected_effect:
+      domain: "vacuum"
+      service: "pause"
+      entity_id: "vacuum.demo_cloud_target"
+      expected_state: "paused"
 
   # Demo-only air conditioner candidates, separate from the twelve standard
   # appliance actions above. Do not add expected_effect to an unknown switch
@@ -241,5 +285,6 @@ actions:
     response_text: "プロジェクションモードにしました。"
     control_type: "stateless_command"
     state_authority: "submitted_only"
+    proof_ceiling: "not_home_control_appliance_coverage_row"
     verification:
       mode: "command_ack_only"

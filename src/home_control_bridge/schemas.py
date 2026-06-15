@@ -75,6 +75,14 @@ class ActionSummary(BaseModel):
     expected_states: list[str] = Field(default_factory=list)
     settle_seconds: float = 0.0
     timeout_seconds: float = 0.0
+    proof_ceiling: str
+    live_test_candidate: bool = False
+    live_test_readiness: str
+    live_test_blockers: list[str] = Field(default_factory=list)
+    restore_action_id: str | None = None
+    stop_action_id: str | None = None
+    terminal_action: bool = False
+    safety_requirements: list[str] = Field(default_factory=list)
 
 
 class ActionStateResponse(BaseModel):
@@ -147,6 +155,14 @@ class ActionResponse(BaseModel):
     expected_states: list[str] = Field(default_factory=list)
     settle_seconds: float = 0.0
     timeout_seconds: float = 0.0
+    proof_ceiling: str | None = None
+    live_test_candidate: bool = False
+    live_test_readiness: str | None = None
+    live_test_blockers: list[str] = Field(default_factory=list)
+    restore_action_id: str | None = None
+    stop_action_id: str | None = None
+    terminal_action: bool = False
+    safety_requirements: list[str] = Field(default_factory=list)
     confirmation_token: str | None = None
     preview: dict[str, Any] | None = None
     error: str | None = None
