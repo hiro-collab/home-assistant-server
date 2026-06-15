@@ -10,7 +10,13 @@ from pydantic import ValidationError
 
 from home_control_bridge.app import create_app
 from home_control_bridge.audit import JsonlAuditLogger
-from home_control_bridge.config import BridgeConfig, ConfigError, get_required_secret, load_config
+from home_control_bridge.config import (
+    BridgeConfig,
+    ConfigError,
+    action_preview_payload,
+    get_required_secret,
+    load_config,
+)
 from home_control_bridge.faults import FaultContext, MAX_FAULT_ATTEMPT_STATE, evaluate_fault
 from home_control_bridge.home_assistant import HomeAssistantEntityState
 
@@ -237,8 +243,27 @@ def test_health_is_available_without_bridge_token(config, token, tmp_path):
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert response.json()["actions_count"] == 2
+    assert response.json()["config_profile"] == "demo"
+    assert response.json()["demo_mappings_present"] is True
+    assert response.json()["light_demo_mappings_present"] is True
     assert response.json()["fault_mode"] is False
     assert response.json()["fault_rules_count"] == 0
+
+
+def test_health_exposes_redacted_config_profile_without_paths(config, token, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME_CONTROL_CONFIG", str(tmp_path / "local" / "env" / "home-control.live.yaml"))
+    client, _, _, _ = make_client(config, token, tmp_path)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    serialized = json.dumps(body)
+    assert body["config_profile"] == "local"
+    assert body["light_demo_mappings_present"] is True
+    assert "home-control.live.yaml" not in serialized
+    assert "light.demo_room" not in serialized
+    assert "HOME_ASSISTANT_TOKEN" not in serialized
 
 
 def test_actions_require_api_token(config, token, tmp_path):
@@ -1389,6 +1414,81 @@ def test_config_rejects_non_script_entities():
                         "label": "玄関を開ける",
                         "ha_script": "lock.front_door",
                         "response_text": "玄関を開けました。",
+                    }
+                },
+            }
+        )
+
+
+def test_source_no_live_fuzz_classifies_open_loop_toggles_as_external_required():
+    config_path = Path(__file__).resolve().parents[1] / "config" / "home-control.example.yaml"
+    loaded = load_config(config_path)
+
+    for action_id in ("light_on", "light_off"):
+        action = loaded.actions[action_id]
+        payload = action_preview_payload(action_id, action)
+
+        assert payload["control_type"] == "stateless_toggle"
+        assert payload["state_authority"] == "open_loop"
+        assert payload["verification_mode"] == "external_observation"
+        assert payload["state_tracking"] == "external_required"
+        assert payload["expected_states"] == []
+        assert "expected_effect" not in payload
+
+
+def test_source_no_live_fuzz_ha_state_without_expected_effect_is_unsupported(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"].pop("expected_effect")
+    raw["actions"]["light_on"]["verification"] = {"mode": "ha_state"}
+
+    loaded = BridgeConfig.model_validate(raw)
+    payload = action_preview_payload("light_on", loaded.actions["light_on"])
+
+    assert payload["verification_mode"] == "ha_state"
+    assert payload["state_tracking"] == "unsupported"
+    assert payload["expected_states"] == []
+    assert "expected_effect" not in payload
+
+
+def test_source_no_live_fuzz_ack_only_with_expected_effect_is_not_tracked(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["curtain_close"]["verification"] = {"mode": "command_ack_only"}
+    raw["actions"]["curtain_close"]["expected_effect"] = {
+        "domain": "cover",
+        "service": "close_cover",
+        "entity_id": "cover.demo_curtain",
+        "expected_state": "closed",
+    }
+
+    loaded = BridgeConfig.model_validate(raw)
+    payload = action_preview_payload("curtain_close", loaded.actions["curtain_close"])
+
+    assert payload["verification_mode"] == "command_ack_only"
+    assert payload["state_tracking"] == "ack_only"
+    assert payload["expected_states"] == []
+    assert "expected_effect" not in payload
+
+
+@pytest.mark.parametrize(
+    "ha_script",
+    [
+        "light.demo_room",
+        "scene.movie_mode",
+        "climate.demo_aircon",
+        "script.BadName",
+        "script.demo-action",
+    ],
+)
+def test_source_no_live_fuzz_rejects_unsafe_or_ambiguous_script_refs(ha_script):
+    with pytest.raises(ValidationError):
+        BridgeConfig.model_validate(
+            {
+                "home_assistant": {"base_url": "http://homeassistant.local:8123"},
+                "actions": {
+                    "ambiguous_action": {
+                        "label": "Ambiguous",
+                        "ha_script": ha_script,
+                        "response_text": "Rejected before live operation.",
                     }
                 },
             }

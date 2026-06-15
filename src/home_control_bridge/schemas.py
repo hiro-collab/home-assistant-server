@@ -157,5 +157,8 @@ class HealthResponse(BaseModel):
     status: Literal["ok", "degraded", "config_error"]
     home_assistant: dict[str, Any]
     actions_count: int
+    config_profile: str = "unknown"
+    demo_mappings_present: bool = False
+    light_demo_mappings_present: bool = False
     fault_mode: bool = False
     fault_rules_count: int = 0

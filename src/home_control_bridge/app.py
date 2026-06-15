@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import secrets
+import os
 from hashlib import sha256
 from datetime import UTC, datetime
 from math import isfinite
+from pathlib import Path
 from time import monotonic
 from typing import Annotated
 from uuid import uuid4
@@ -120,6 +122,9 @@ def create_app(
                 status="config_error",
                 home_assistant={"ok": False, "error": GENERIC_CONFIG_ERROR},
                 actions_count=0,
+                config_profile="unknown",
+                demo_mappings_present=False,
+                light_demo_mappings_present=False,
                 fault_mode=False,
                 fault_rules_count=0,
             )
@@ -129,6 +134,9 @@ def create_app(
                 status="config_error",
                 home_assistant={"ok": False, "error": GENERIC_CONFIG_ERROR},
                 actions_count=len(app.state.config.actions),
+                config_profile=_config_profile(app.state.config),
+                demo_mappings_present=_demo_mappings_present(app.state.config),
+                light_demo_mappings_present=_light_demo_mappings_present(app.state.config),
                 fault_mode=False,
                 fault_rules_count=0,
             )
@@ -139,6 +147,9 @@ def create_app(
             status="ok" if ok else "degraded",
             home_assistant=ha_status,
             actions_count=len(app.state.config.actions),
+            config_profile=_config_profile(app.state.config),
+            demo_mappings_present=_demo_mappings_present(app.state.config),
+            light_demo_mappings_present=_light_demo_mappings_present(app.state.config),
             fault_mode=False,
             fault_rules_count=0,
         )
@@ -595,6 +606,40 @@ def _get_action(config: BridgeConfig, action_id: str):
     if action is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Action is not allowlisted.")
     return action
+
+
+def _demo_mappings_present(config: BridgeConfig) -> bool:
+    return any(action.ha_script.startswith("script.demo_") for action in config.actions.values())
+
+
+def _light_demo_mappings_present(config: BridgeConfig) -> bool:
+    return any(
+        action_id in {"light_on", "light_off"} and action.ha_script.startswith("script.demo_")
+        for action_id, action in config.actions.items()
+    )
+
+
+def _config_profile(config: BridgeConfig) -> str:
+    configured = os.environ.get("HOME_CONTROL_CONFIG", "").strip()
+    if configured:
+        normalized = configured.replace("\\", "/").lower()
+        name = Path(normalized).name
+        if normalized.endswith("local/env/home-control.live.yaml"):
+            return "local"
+        if "example" in name or "demo" in name:
+            return "demo"
+        if "local" in name or "private" in name or "/local/" in normalized:
+            return "private"
+        if "generated" in name or ".cache/" in normalized:
+            return "generated"
+        if name == "home-control.yaml" and _light_demo_mappings_present(config):
+            return "demo"
+        return "custom"
+    if _light_demo_mappings_present(config):
+        return "demo"
+    if _demo_mappings_present(config):
+        return "custom"
+    return "unknown"
 
 
 def _request_audit_fields(body: ActionRequest) -> dict[str, object]:
