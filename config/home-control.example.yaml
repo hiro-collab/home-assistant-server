@@ -1,3 +1,19 @@
+#
+# Public demo/default/template config.
+#
+# This file is useful for source/static checks, catalog shape, and examples, but
+# it is not a proof-ready private/live Home Assistant config for another house.
+# For external HA verification, copy or generate an ignored private full-schema
+# config, replace demo script/entity values locally, and keep expected-effect
+# target plus verification metadata present. A short/minimal action-only override
+# can submit or acknowledge commands, but it cannot support HA-visible CheckState
+# proof or CheckTracking tracked_ready by itself.
+#
+# Fresh clones should select the private full-schema config or a reviewed
+# clone-local equivalent after env/config render, then pass a read-only parity
+# gate before any preview, dry-run, or live execute route. See:
+# docs/home-assistant-setup.md
+
 home_assistant:
   base_url: "http://homeassistant.local:8123"
   token_env: "HOME_ASSISTANT_TOKEN"
