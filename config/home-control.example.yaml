@@ -13,6 +13,8 @@
 # clone-local equivalent after env/config render, then pass a read-only parity
 # gate before any preview, dry-run, or live execute route. See:
 # docs/home-assistant-setup.md
+# Use CheckTracking for pre-execution metadata readiness; use CheckState only
+# for current-state/JIT or post-action/post-restore HA-visible state checks.
 
 home_assistant:
   base_url: "http://homeassistant.local:8123"
