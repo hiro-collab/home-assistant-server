@@ -354,6 +354,9 @@ def test_operator_console_is_local_ui_without_embedded_secrets(config, token, tm
     assert "/preview" in body
     assert "/execute" in body
     assert "Bridge API token" in body
+    assert 'id="route-actions"' in body
+    assert "aircon_cool" in body
+    assert "aircon_hvac_off" in body
     assert token not in body
     assert "HOME_CONTROL_API_TOKEN" not in body
     assert "local-test-token" not in body

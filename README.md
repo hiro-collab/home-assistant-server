@@ -70,6 +70,10 @@ URL、entity ID、secret は埋め込みません。
 この画面は allowlist 済み action を可視化して、state / preview / dry-run / execute /
 confirm execute を選べるようにするものです。実行ボタンは既存の bridge API を呼ぶため、
 live 操作には従来どおり明示的な route / review / user authority が必要です。
+起動直後の route 用に、`aircon_cool` と `aircon_hvac_off` は固定ショートカットとして
+表示されます。これは action id を見えるようにするだけで、token 入力後も既存 API の
+認証・allowlist・確認・実行境界をそのまま使います。詳細 metadata が必要な場合は
+従来どおり `Load actions` で catalog を取得します。
 
 ## 文書
 

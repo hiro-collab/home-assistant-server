@@ -170,6 +170,7 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
     <button id="load" class="primary" type="button">Load actions</button>
   </div>
   <p id="status" class="status">Enter the local bridge token, then load the allowlisted actions.</p>
+  <section id="route-actions" class="grid" aria-label="Reviewed route action shortcuts"></section>
   <section id="actions" class="grid" aria-live="polite"></section>
   <pre id="output" aria-live="polite"></pre>
 </main>
@@ -178,8 +179,13 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
   const tokenInput = document.getElementById("token");
   const loadButton = document.getElementById("load");
   const statusNode = document.getElementById("status");
+  const routeActionsNode = document.getElementById("route-actions");
   const actionsNode = document.getElementById("actions");
   const outputNode = document.getElementById("output");
+  const reviewedRouteActions = [
+    { action_id: "aircon_cool", label: "AC cool route action", route_shortcut_class: "reviewed_first_action_candidate" },
+    { action_id: "aircon_hvac_off", label: "AC off restore route action", route_shortcut_class: "reviewed_restore_candidate" },
+  ];
 
   const setStatus = (text) => {
     statusNode.textContent = text;
@@ -265,6 +271,7 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
     appendMetaRow(meta, "proof", action.proof_ceiling);
     appendMetaRow(meta, "restore", action.restore_action_id);
     appendMetaRow(meta, "stop", action.stop_action_id);
+    appendMetaRow(meta, "route", action.route_shortcut_class);
     appendMetaRow(meta, "wait", `${action.settle_seconds || 0}s / ${action.timeout_seconds || 0}s`);
     appendMetaRow(meta, "blockers", action.live_test_blockers);
     article.append(title, actionId, meta);
@@ -328,6 +335,13 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
     return article;
   }
 
+  function renderRouteShortcuts() {
+    routeActionsNode.textContent = "";
+    for (const action of reviewedRouteActions) {
+      routeActionsNode.appendChild(renderAction(action));
+    }
+  }
+
   async function loadActions() {
     const actions = await withResult("load actions", () => callBridge("/actions"));
     actionsNode.textContent = "";
@@ -339,6 +353,7 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
     }
   }
 
+  renderRouteShortcuts();
   loadButton.addEventListener("click", loadActions);
 })();
 </script>

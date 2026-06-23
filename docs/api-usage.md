@@ -28,6 +28,10 @@ Content-Type: application/json
 この画面は API と同じ `/actions`、`/actions/{action_id}/state`、preview、execute を
 呼ぶため、証明上限や confirmation token の扱いは API と同じです。`dry run` ボタンは
 Home Assistant を呼ばず、`execute` / `confirm execute` ボタンだけが既存の実行 API へ進みます。
+起動直後に catalog を読まなくても first-action route の候補を選べるように、
+`aircon_cool` と `aircon_hvac_off` は固定ショートカットとして表示されます。
+ショートカットは token や Home Assistant の URL/entity ID を埋め込まず、押されたときだけ
+既存の認証済み action API を呼びます。
 
 ## 状態確認
 
