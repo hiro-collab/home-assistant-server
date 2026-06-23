@@ -49,6 +49,31 @@ Home Assistant の long-lived access token はこのブリッジだけが持ち�
 
 `dry_run: true` は、Home Assistant へ命令を送らずに実行予定の応答だけを返す試運転です。Dify 側の分岐確認や統合テストに使います。
 
+## 証明境界
+
+Home Control Safety Bridge は action 実行の入口と Home Assistant への中継結果を扱います。
+各 surface の証明上限を混ぜないでください。
+
+| surface | 実行副作用 | 証明できること | 証明しないこと |
+|---|---|---|---|
+| `/operator` fixed shortcut | クリック前はなし | allowlist 済み action ID と route metadata が見えること | live execute、HA state match、物理家電動作 |
+| `GET /actions` | なし | allowlist catalog、restore/stop 候補、live readiness metadata | action 実行、catalog 外 action の許可 |
+| `POST /actions/{action_id}/preview` | Home Assistant 呼び出しなし | 実行予定文言、確認要否、一時 confirmation token | live execute、dry-run、HA state match |
+| `POST /actions/{action_id}/execute` with `dry_run: true` | Home Assistant 呼び出しなし | execute payload の分岐と dry-run 応答 | live execute、confirmation token の再利用可否 |
+| `POST /actions/{action_id}/execute` | Home Assistant script 呼び出しあり | command submission と bridge response | HA-visible state match、物理家電動作 |
+| `GET /actions/{action_id}/state` | なし | HA-visible current state / expected state の読み取り一致 | command submission、物理家電動作 |
+
+`CheckTracking` 相当の追跡 ID、`CheckState` 相当の HA-visible state、一時
+confirmation token、物理家電状態は別々の層です。reviewed route が要求した層だけを
+結果として主張し、`command accepted` や `confirmed-submitted` を physical proof として
+扱わないでください。
+
+`restore_required: false` の light / fan などは command stimulus として扱えますが、
+これは「戻し操作不要」の source/static planning metadata であり、現在状態が読めたことや
+物理状態が変化したことを意味しません。door は `door_open` に対して `door_close` を
+復帰候補にし、vacuum の終端/復帰候補は route ごとに `vacuum_return` などの allowlist
+action で明示します。
+
 ## 演出通知
 
 UDP 通知は TouchDesigner などの演出同期用です。命令の開始、成功、失敗を横流ししますが、家電状態の観測結果や成功判定には使いません。詳しくは [event-notifications.md](event-notifications.md) を参照してください。
