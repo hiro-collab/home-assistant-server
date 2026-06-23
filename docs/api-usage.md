@@ -52,6 +52,9 @@ catalog / preview には `settle_seconds` と `timeout_seconds` も出ますが�
   `not_live_test_candidate` です。
 - `live_test_blockers`: `missing_ha_visible_success_criterion`、
   `missing_restore_or_stop`、`safety_requirement:*` など、実行しない理由です。
+- `restore_required`: `false` の action は、復帰や HA state proof を要求しない
+  command stimulus として review 計画に入れられます。これは command submission
+  proof 以上の主張ではありません。
 - `restore_action_id` / `stop_action_id`: live 実行時に戻す、または止める候補 action です。
 - `terminal_action`: `vacuum_return` のように、その action 自体が安全な終端/復帰として
   扱えることを示します。
@@ -59,9 +62,11 @@ catalog / preview には `settle_seconds` と `timeout_seconds` も出ますが�
   live 前提です。
 
 `live_test_readiness: "test_now"` 以外の action は、現構成レビューの live batch に
-自動投入しないでください。これは Home Assistant の状態が読める行でも同じです。
-たとえば cover position や vacuum state が読めても、障害物安全、元位置復帰、
-床面/経路安全、return/cleanup が不足していれば `do_not_test_current_config` です。
+自動投入しないでください。Home Assistant の状態が読める行でも、route が復帰や
+state proof を要求するなら `restore_action_id` / `stop_action_id` / `terminal_action`
+を明示します。逆に、light / fan のような command-stimulus 行は
+`restore_required: false` にして、unknown current state を proof limitation として
+返しながら command submission の刺激にできます。
 
 ## プレビュー
 

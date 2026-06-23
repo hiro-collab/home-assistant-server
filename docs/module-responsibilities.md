@@ -98,6 +98,9 @@ this from labels:
 - `live_test_readiness` is `test_now`, `do_not_test_current_config`, or
   `not_live_test_candidate`.
 - `live_test_blockers` must name missing success, restore/stop, or safety gates.
+- `restore_required` distinguishes actions that need a restore/stop/terminal
+  model from command-stimulus actions that can be executed as submitted-only or
+  external-observation-required feedback-loop stimuli.
 - `restore_action_id`, `stop_action_id`, and `terminal_action` describe how the
   review plan can stop or restore the appliance without guessing.
 - `safety_requirements` are user/physical-world gates such as obstruction,

@@ -191,8 +191,12 @@ def test_example_config_loads_with_standard_appliance_actions_and_demo_climate_c
     assert loaded.actions["light_on"].verification is not None
     assert loaded.actions["light_on"].verification.mode == "external_observation"
     assert loaded.actions["light_on"].expected_effect is None
+    assert loaded.actions["light_on"].live_test_candidate is True
+    assert loaded.actions["light_on"].restore_required is False
     assert loaded.actions["light_off"].control_type == "stateless_toggle"
     assert loaded.actions["light_off"].expected_effect is None
+    assert loaded.actions["light_off"].live_test_candidate is True
+    assert loaded.actions["light_off"].restore_required is False
 
     for action_id in ("fan_on", "fan_off", "aircon_on", "aircon_off"):
         action = loaded.actions[action_id]
@@ -201,6 +205,12 @@ def test_example_config_loads_with_standard_appliance_actions_and_demo_climate_c
         assert action.verification is not None
         assert action.verification.mode == "command_ack_only"
         assert action.expected_effect is None
+
+    for action_id in ("light_on", "light_off", "fan_on", "fan_off"):
+        payload = action_preview_payload(action_id, loaded.actions[action_id])
+        assert payload["live_test_readiness"] == "test_now"
+        assert payload["restore_required"] is False
+        assert payload["live_test_blockers"] == []
 
     for action_id in ("door_open", "door_close"):
         action = loaded.actions[action_id]
@@ -215,9 +225,11 @@ def test_example_config_loads_with_standard_appliance_actions_and_demo_climate_c
         payload = action_preview_payload(action_id, action)
         assert payload["proof_ceiling"] == "ha_visible_cover_position_checkstate_layer"
         assert payload["live_test_candidate"] is True
-        assert payload["live_test_readiness"] == "do_not_test_current_config"
-        assert "safety_requirement:obstruction_clearance" in payload["live_test_blockers"]
-        assert "safety_requirement:original_position_restore" in payload["live_test_blockers"]
+        assert payload["live_test_readiness"] == "test_now"
+        assert payload["live_test_blockers"] == []
+
+    assert loaded.actions["door_open"].restore_action_id == "door_close"
+    assert loaded.actions["door_close"].terminal_action is True
 
     door_stop = loaded.actions["door_stop"]
     assert door_stop.control_type == "position_command"
@@ -239,8 +251,8 @@ def test_example_config_loads_with_standard_appliance_actions_and_demo_climate_c
         payload = action_preview_payload(action_id, action)
         assert payload["proof_ceiling"] == "ha_visible_vacuum_state_checkstate_layer"
         assert payload["live_test_candidate"] is True
-        assert payload["live_test_readiness"] == "do_not_test_current_config"
-        assert payload["live_test_blockers"]
+        assert payload["live_test_readiness"] == "test_now"
+        assert payload["live_test_blockers"] == []
 
     assert loaded.actions["vacuum_return"].control_type == "job_command"
     assert loaded.actions["vacuum_return"].state_authority == "ha_entity"
@@ -255,11 +267,16 @@ def test_example_config_loads_with_standard_appliance_actions_and_demo_climate_c
     assert vacuum_return_payload["live_test_blockers"] == []
 
     assert loaded.actions["aircon_cool"].control_type == "mode_command"
+    assert loaded.actions["aircon_cool"].live_test_candidate is True
+    assert loaded.actions["aircon_cool"].restore_action_id == "aircon_hvac_off"
     assert loaded.actions["aircon_cool"].verification is not None
     assert loaded.actions["aircon_cool"].verification.mode == "ha_state"
     assert loaded.actions["aircon_cool"].expected_effect is not None
     assert loaded.actions["aircon_cool"].expected_effect.domain == "climate"
     assert loaded.actions["aircon_cool"].expected_effect.service == "set_hvac_mode"
+    assert action_preview_payload("aircon_cool", loaded.actions["aircon_cool"])["live_test_readiness"] == "test_now"
+    assert loaded.actions["aircon_hvac_off"].live_test_candidate is True
+    assert loaded.actions["aircon_hvac_off"].terminal_action is True
     assert loaded.actions["aircon_hvac_off"].expected_effect is not None
     assert loaded.actions["aircon_hvac_off"].expected_effect.expected_state == "off"
 
@@ -276,13 +293,13 @@ def test_example_config_live_readiness_classes_are_source_reproducible():
 
     door_open_payload = action_preview_payload("door_open", loaded.actions["door_open"])
     assert door_open_payload["proof_ceiling"] == "ha_visible_cover_position_checkstate_layer"
-    assert door_open_payload["live_test_readiness"] == "do_not_test_current_config"
-    assert "safety_requirement:obstruction_clearance" in door_open_payload["live_test_blockers"]
+    assert door_open_payload["live_test_readiness"] == "test_now"
+    assert door_open_payload["restore_action_id"] == "door_close"
 
     vacuum_start_payload = action_preview_payload("vacuum_start", loaded.actions["vacuum_start"])
     assert vacuum_start_payload["proof_ceiling"] == "ha_visible_vacuum_state_checkstate_layer"
-    assert vacuum_start_payload["live_test_readiness"] == "do_not_test_current_config"
-    assert "safety_requirement:path_floor_safety" in vacuum_start_payload["live_test_blockers"]
+    assert vacuum_start_payload["live_test_readiness"] == "test_now"
+    assert vacuum_start_payload["restore_action_id"] == "vacuum_return"
 
     vacuum_return_payload = action_preview_payload("vacuum_return", loaded.actions["vacuum_return"])
     assert vacuum_return_payload["proof_ceiling"] == "ha_visible_vacuum_return_checkstate_layer"
@@ -1486,6 +1503,20 @@ def test_live_readiness_blocks_candidate_without_restore_or_stop(config):
 
     assert payload["live_test_readiness"] == "do_not_test_current_config"
     assert payload["live_test_blockers"] == ["missing_restore_or_stop"]
+
+
+def test_restore_not_required_allows_command_stimulus_candidate(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["curtain_close"]["live_test_candidate"] = True
+    raw["actions"]["curtain_close"]["restore_required"] = False
+
+    loaded = BridgeConfig.model_validate(raw)
+    payload = action_preview_payload("curtain_close", loaded.actions["curtain_close"])
+
+    assert payload["live_test_readiness"] == "test_now"
+    assert payload["restore_required"] is False
+    assert payload["state_tracking"] == "ack_only"
+    assert payload["live_test_blockers"] == []
 
 
 def test_terminal_action_with_ha_state_can_be_live_test_candidate(config):

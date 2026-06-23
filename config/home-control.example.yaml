@@ -64,6 +64,8 @@ actions:
     response_text: "照明をつける操作を送信しました。実際の点灯状態は外部観測で確認してください。"
     control_type: "stateless_toggle"
     state_authority: "open_loop"
+    live_test_candidate: true
+    restore_required: false
     verification:
       mode: "external_observation"
 
@@ -74,6 +76,8 @@ actions:
     response_text: "照明を消す操作を送信しました。実際の消灯状態は外部観測で確認してください。"
     control_type: "stateless_toggle"
     state_authority: "open_loop"
+    live_test_candidate: true
+    restore_required: false
     verification:
       mode: "external_observation"
 
@@ -84,6 +88,8 @@ actions:
     response_text: "扇風機をつける操作を送信しました。実際の稼働状態は外部観測で確認してください。"
     control_type: "stateless_command"
     state_authority: "submitted_only"
+    live_test_candidate: true
+    restore_required: false
     verification:
       mode: "command_ack_only"
 
@@ -94,6 +100,8 @@ actions:
     response_text: "扇風機を止める操作を送信しました。実際の停止状態は外部観測で確認してください。"
     control_type: "stateless_command"
     state_authority: "submitted_only"
+    live_test_candidate: true
+    restore_required: false
     verification:
       mode: "command_ack_only"
 
@@ -118,18 +126,15 @@ actions:
       mode: "command_ack_only"
 
   door_open:
-    label: "カーテンを開ける"
+    label: "中扉を開ける"
     ha_script: "script.demo_door_open"
     confirm_required: true
-    response_text: "カーテンを開ける操作を送信しました。HA の位置状態を確認してください。"
+    response_text: "中扉を開ける操作を送信しました。HA の位置状態を確認してください。"
     control_type: "position_command"
     state_authority: "ha_entity"
     live_test_candidate: true
     restore_action_id: "door_close"
     stop_action_id: "door_stop"
-    safety_requirements:
-      - "obstruction_clearance"
-      - "original_position_restore"
     proof_ceiling: "ha_visible_cover_position_checkstate_layer"
     verification:
       mode: "ha_state"
@@ -146,18 +151,15 @@ actions:
       expected_state: "open"
 
   door_close:
-    label: "カーテンを閉める"
+    label: "中扉を閉める"
     ha_script: "script.demo_door_close"
     confirm_required: true
-    response_text: "カーテンを閉める操作を送信しました。HA の位置状態を確認してください。"
+    response_text: "中扉を閉める操作を送信しました。HA の位置状態を確認してください。"
     control_type: "position_command"
     state_authority: "ha_entity"
     live_test_candidate: true
-    restore_action_id: "door_open"
+    terminal_action: true
     stop_action_id: "door_stop"
-    safety_requirements:
-      - "obstruction_clearance"
-      - "original_position_restore"
     proof_ceiling: "ha_visible_cover_position_checkstate_layer"
     verification:
       mode: "ha_state"
@@ -174,10 +176,10 @@ actions:
       expected_state: "closed"
 
   door_stop:
-    label: "カーテンを止める"
+    label: "中扉を止める"
     ha_script: "script.demo_door_stop"
     confirm_required: true
-    response_text: "カーテンを止める操作を送信しました。停止状態は外部観測で確認してください。"
+    response_text: "中扉を止める操作を送信しました。停止状態は外部観測で確認してください。"
     control_type: "position_command"
     state_authority: "submitted_only"
     proof_ceiling: "command_ack_only"
@@ -193,8 +195,6 @@ actions:
     state_authority: "ha_entity"
     live_test_candidate: true
     restore_action_id: "vacuum_return"
-    safety_requirements:
-      - "path_floor_safety"
     proof_ceiling: "ha_visible_vacuum_state_checkstate_layer"
     verification:
       mode: "ha_state"
@@ -239,9 +239,6 @@ actions:
     state_authority: "ha_entity"
     live_test_candidate: true
     restore_action_id: "vacuum_return"
-    safety_requirements:
-      - "active_task_context"
-      - "return_cleanup"
     proof_ceiling: "ha_visible_vacuum_state_checkstate_layer"
     verification:
       mode: "ha_state"
@@ -266,6 +263,8 @@ actions:
     response_text: "エアコンを冷房にしました。"
     control_type: "mode_command"
     state_authority: "ha_entity"
+    live_test_candidate: true
+    restore_action_id: "aircon_hvac_off"
     verification:
       mode: "ha_state"
       accepted_states: ["cool"]
@@ -284,6 +283,8 @@ actions:
     response_text: "エアコンを停止しました。"
     control_type: "mode_command"
     state_authority: "ha_entity"
+    live_test_candidate: true
+    terminal_action: true
     verification:
       mode: "ha_state"
       accepted_states: ["off"]

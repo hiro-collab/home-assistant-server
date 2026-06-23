@@ -268,6 +268,7 @@ class ActionConfig(BaseModel):
     verification: VerificationConfig | None = None
     expected_effect: ExpectedEffectConfig | None = None
     live_test_candidate: bool = False
+    restore_required: bool = True
     restore_action_id: str | None = Field(default=None, max_length=80)
     stop_action_id: str | None = Field(default=None, max_length=80)
     terminal_action: bool = False
@@ -421,6 +422,7 @@ def action_preview_payload(action_id: str, action: ActionConfig) -> dict[str, An
         "live_test_candidate": action.live_test_candidate,
         "live_test_readiness": action_live_test_readiness(action),
         "live_test_blockers": action_live_test_blockers(action),
+        "restore_required": action.restore_required,
         "restore_action_id": action.restore_action_id,
         "stop_action_id": action.stop_action_id,
         "terminal_action": action.terminal_action,
@@ -554,10 +556,11 @@ def action_live_test_blockers(action: ActionConfig) -> list[str]:
     if not action.live_test_candidate:
         blockers.append("not_marked_live_test_candidate")
 
-    if action_state_tracking_status(action) != "tracked":
+    command_stimulus_allowed = action.live_test_candidate and not action.restore_required
+    if action_state_tracking_status(action) != "tracked" and not command_stimulus_allowed:
         blockers.append("missing_ha_visible_success_criterion")
 
-    if action.live_test_candidate and not action.terminal_action:
+    if action.live_test_candidate and action.restore_required and not action.terminal_action:
         if action.restore_action_id is None and action.stop_action_id is None:
             blockers.append("missing_restore_or_stop")
 
