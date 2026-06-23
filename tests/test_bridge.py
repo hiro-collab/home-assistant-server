@@ -341,6 +341,24 @@ def test_health_exposes_redacted_config_profile_without_paths(config, token, tmp
     assert "HOME_ASSISTANT_TOKEN" not in serialized
 
 
+def test_operator_console_is_local_ui_without_embedded_secrets(config, token, tmp_path):
+    client, _, _, _ = make_client(config, token, tmp_path)
+
+    response = client.get("/operator")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    body = response.text
+    assert "Home Control Operator" in body
+    assert "/actions" in body
+    assert "/preview" in body
+    assert "/execute" in body
+    assert "Bridge API token" in body
+    assert token not in body
+    assert "HOME_CONTROL_API_TOKEN" not in body
+    assert "local-test-token" not in body
+
+
 def test_actions_require_api_token(config, token, tmp_path):
     client, _, _, _ = make_client(config, token, tmp_path)
 

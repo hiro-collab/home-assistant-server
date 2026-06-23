@@ -11,7 +11,7 @@ from typing import Annotated
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from .audit import JsonlAuditLogger
 from .config import (
@@ -44,6 +44,307 @@ EXECUTION_REQUEST_TTL_SECONDS = 600
 GENERIC_CONFIG_ERROR = "Bridge configuration is unavailable."
 HOME_ASSISTANT_ERROR_CODE = "home_assistant_request_failed"
 DRY_RUN_CONFLICT_ERROR_CODE = "dry_run_request_conflict"
+
+OPERATOR_CONSOLE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Home Control Operator</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+    body {
+      margin: 0;
+      background: Canvas;
+      color: CanvasText;
+    }
+    main {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    h1 {
+      margin: 0 0 16px;
+      font-size: 1.5rem;
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+    input {
+      min-width: min(460px, 100%);
+      flex: 1 1 280px;
+      padding: 8px 10px;
+      border: 1px solid color-mix(in srgb, CanvasText 35%, Canvas);
+      border-radius: 6px;
+      font: inherit;
+    }
+    button {
+      min-height: 36px;
+      padding: 7px 11px;
+      border: 1px solid color-mix(in srgb, CanvasText 35%, Canvas);
+      border-radius: 6px;
+      background: ButtonFace;
+      color: ButtonText;
+      font: inherit;
+      cursor: pointer;
+    }
+    button.primary {
+      border-color: #1d4ed8;
+      background: #2563eb;
+      color: white;
+    }
+    button.danger {
+      border-color: #b91c1c;
+      background: #dc2626;
+      color: white;
+    }
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px;
+    }
+    .action {
+      border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas);
+      border-radius: 8px;
+      padding: 14px;
+      background: color-mix(in srgb, Canvas 94%, CanvasText);
+    }
+    .action h2 {
+      margin: 0 0 8px;
+      font-size: 1rem;
+    }
+    .meta {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 4px 10px;
+      margin: 10px 0 12px;
+      font-size: 0.9rem;
+    }
+    .meta dt {
+      color: color-mix(in srgb, CanvasText 65%, Canvas);
+    }
+    .meta dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+    }
+    .status {
+      margin: 0 0 14px;
+      min-height: 20px;
+      color: color-mix(in srgb, CanvasText 72%, Canvas);
+    }
+    pre {
+      margin-top: 18px;
+      padding: 12px;
+      max-height: 360px;
+      overflow: auto;
+      border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas);
+      border-radius: 8px;
+      background: color-mix(in srgb, Canvas 88%, CanvasText);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Home Control Operator</h1>
+  <div class="toolbar">
+    <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Bridge API token">
+    <button id="load" class="primary" type="button">Load actions</button>
+  </div>
+  <p id="status" class="status">Enter the local bridge token, then load the allowlisted actions.</p>
+  <section id="actions" class="grid" aria-live="polite"></section>
+  <pre id="output" aria-live="polite"></pre>
+</main>
+<script>
+(() => {
+  const tokenInput = document.getElementById("token");
+  const loadButton = document.getElementById("load");
+  const statusNode = document.getElementById("status");
+  const actionsNode = document.getElementById("actions");
+  const outputNode = document.getElementById("output");
+
+  const setStatus = (text) => {
+    statusNode.textContent = text;
+  };
+
+  const show = (label, value) => {
+    outputNode.textContent = `${label}\\n${JSON.stringify(value, null, 2)}`;
+  };
+
+  const requestId = (actionId, suffix) => (
+    `operator-${actionId}-${suffix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  );
+
+  const token = () => tokenInput.value.trim();
+
+  async function callBridge(path, options = {}) {
+    const currentToken = token();
+    if (!currentToken) {
+      throw new Error("Bridge API token is required.");
+    }
+    const response = await fetch(path, {
+      ...options,
+      headers: {
+        "Authorization": `Bearer ${currentToken}`,
+        "Content-Type": "application/json",
+        ...(options.headers || {}),
+      },
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(`HTTP ${response.status}`);
+      error.body = body;
+      throw error;
+    }
+    return body;
+  }
+
+  const bodyFor = (actionId, suffix, extra = {}) => ({
+    source: "home_control_operator_console",
+    request_id: requestId(actionId, suffix),
+    ...extra,
+  });
+
+  async function withResult(label, fn) {
+    try {
+      setStatus(`${label}...`);
+      const result = await fn();
+      show(label, result);
+      setStatus(`${label}: done`);
+      return result;
+    } catch (error) {
+      show(`${label}: failed`, error.body || { error: error.message });
+      setStatus(`${label}: failed`);
+      return null;
+    }
+  }
+
+  function appendMetaRow(list, label, value) {
+    if (value === null || value === undefined || value === "") {
+      return;
+    }
+    const rendered = Array.isArray(value) ? value.join(", ") : String(value);
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const description = document.createElement("dd");
+    description.textContent = rendered;
+    list.append(term, description);
+  }
+
+  function renderAction(action) {
+    const article = document.createElement("article");
+    article.className = "action";
+    const title = document.createElement("h2");
+    title.textContent = action.label;
+    const actionId = document.createElement("div");
+    actionId.textContent = action.action_id;
+    const meta = document.createElement("dl");
+    meta.className = "meta";
+    appendMetaRow(meta, "control", action.control_type);
+    appendMetaRow(meta, "tracking", action.state_tracking);
+    appendMetaRow(meta, "verification", action.verification_mode);
+    appendMetaRow(meta, "readiness", action.live_test_readiness);
+    appendMetaRow(meta, "proof", action.proof_ceiling);
+    appendMetaRow(meta, "restore", action.restore_action_id);
+    appendMetaRow(meta, "stop", action.stop_action_id);
+    appendMetaRow(meta, "wait", `${action.settle_seconds || 0}s / ${action.timeout_seconds || 0}s`);
+    appendMetaRow(meta, "blockers", action.live_test_blockers);
+    article.append(title, actionId, meta);
+    const row = document.createElement("div");
+    row.className = "row";
+
+    const stateButton = document.createElement("button");
+    stateButton.type = "button";
+    stateButton.textContent = "State";
+    stateButton.onclick = () => withResult(`state ${action.action_id}`, () => callBridge(`/actions/${action.action_id}/state`));
+    row.appendChild(stateButton);
+
+    const previewButton = document.createElement("button");
+    previewButton.type = "button";
+    previewButton.textContent = "Preview";
+    previewButton.onclick = () => withResult(`preview ${action.action_id}`, () => callBridge(
+      `/actions/${action.action_id}/preview`,
+      { method: "POST", body: JSON.stringify(bodyFor(action.action_id, "preview")) },
+    ));
+    row.appendChild(previewButton);
+
+    const dryRunButton = document.createElement("button");
+    dryRunButton.type = "button";
+    dryRunButton.textContent = "Dry run";
+    dryRunButton.onclick = () => withResult(`dry run ${action.action_id}`, () => callBridge(
+      `/actions/${action.action_id}/execute`,
+      { method: "POST", body: JSON.stringify(bodyFor(action.action_id, "dry-run", { dry_run: true })) },
+    ));
+    row.appendChild(dryRunButton);
+
+    const executeButton = document.createElement("button");
+    executeButton.type = "button";
+    executeButton.className = "danger";
+    executeButton.textContent = "Execute";
+    executeButton.onclick = async () => {
+      const result = await withResult(`execute ${action.action_id}`, () => callBridge(
+        `/actions/${action.action_id}/execute`,
+        { method: "POST", body: JSON.stringify(bodyFor(action.action_id, "execute")) },
+      ));
+      if (result && result.confirmation_required && result.confirmation_token) {
+        const confirmButton = document.createElement("button");
+        confirmButton.type = "button";
+        confirmButton.className = "danger";
+        confirmButton.textContent = "Confirm execute";
+        confirmButton.onclick = () => withResult(`confirm ${action.action_id}`, () => callBridge(
+          `/actions/${action.action_id}/execute`,
+          {
+            method: "POST",
+            body: JSON.stringify(bodyFor(action.action_id, "confirm", {
+              confirmed: true,
+              confirmation_token: result.confirmation_token,
+            })),
+          },
+        ));
+        row.appendChild(confirmButton);
+      }
+    };
+    row.appendChild(executeButton);
+
+    article.appendChild(row);
+    return article;
+  }
+
+  async function loadActions() {
+    const actions = await withResult("load actions", () => callBridge("/actions"));
+    actionsNode.textContent = "";
+    if (!Array.isArray(actions)) {
+      return;
+    }
+    for (const action of actions) {
+      actionsNode.appendChild(renderAction(action));
+    }
+  }
+
+  loadButton.addEventListener("click", loadActions);
+})();
+</script>
+</body>
+</html>
+"""
 
 
 def create_app(
@@ -156,6 +457,10 @@ def create_app(
             fault_mode=False,
             fault_rules_count=0,
         )
+
+    @app.get("/operator", response_class=HTMLResponse, include_in_schema=False)
+    async def operator_console() -> HTMLResponse:
+        return HTMLResponse(OPERATOR_CONSOLE_HTML)
 
     @app.get("/actions", response_model=list[ActionSummary], dependencies=[Depends(require_auth)])
     async def list_actions() -> list[ActionSummary]:

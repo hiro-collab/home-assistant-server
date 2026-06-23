@@ -19,6 +19,16 @@ Content-Type: application/json
 - URL: `http://127.0.0.1:8787/actions`
 - Headers: `Authorization: Bearer {{HOME_CONTROL_API_TOKEN}}`
 
+## ローカル操作画面
+
+ブラウザで `http://127.0.0.1:8787/operator` を開くと、同じ allowlist catalog を
+人間が確認して選べるローカル操作画面を使えます。画面には `HOME_CONTROL_API_TOKEN`
+の値を埋め込まず、operator が入力した token をブラウザメモリ内のリクエストヘッダーにだけ使います。
+
+この画面は API と同じ `/actions`、`/actions/{action_id}/state`、preview、execute を
+呼ぶため、証明上限や confirmation token の扱いは API と同じです。`dry run` ボタンは
+Home Assistant を呼ばず、`execute` / `confirm execute` ボタンだけが既存の実行 API へ進みます。
+
 ## 状態確認
 
 `verification.mode: ha_state` かつ `expected_effect` がある action について、Home Assistant の現在 state を読み取り専用で確認します。Home Assistant の URL や entity ID は返しません。

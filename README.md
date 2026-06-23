@@ -60,6 +60,17 @@ plain `uv run uvicorn ...` は `.env` を自動では読みません。その場
 `.env` から token を読めても、server 側が `HOME_ASSISTANT_TOKEN` を受け取れず
 `/health` が `config_error`、`/actions` が `503` になることがあります。
 
+## ローカル操作画面
+
+起動中の bridge は `http://127.0.0.1:8787/operator` にローカル操作画面を出します。
+画面は `GET /actions`、`/state`、`/preview`、`/execute` を人間が選べる形にした薄い UI です。
+API token は画面で入力し、ページ内のメモリにだけ保持します。HTML には token、Home Assistant
+URL、entity ID、secret は埋め込みません。
+
+この画面は allowlist 済み action を可視化して、state / preview / dry-run / execute /
+confirm execute を選べるようにするものです。実行ボタンは既存の bridge API を呼ぶため、
+live 操作には従来どおり明示的な route / review / user authority が必要です。
+
 ## 文書
 
 - 責務境界: [docs/module-responsibilities.md](docs/module-responsibilities.md)
