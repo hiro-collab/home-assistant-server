@@ -28,10 +28,13 @@ Content-Type: application/json
 この画面は API と同じ `/actions`、`/actions/{action_id}/state`、preview、execute を
 呼ぶため、証明上限や confirmation token の扱いは API と同じです。`dry run` ボタンは
 Home Assistant を呼ばず、`execute` / `confirm execute` ボタンだけが既存の実行 API へ進みます。
-起動直後に catalog を読まなくても first-action route の候補を選べるように、
-`aircon_cool` と `aircon_hvac_off` は固定ショートカットとして表示されます。
-ショートカットは token や Home Assistant の URL/entity ID を埋め込まず、押されたときだけ
-既存の認証済み action API を呼びます。
+起動直後に catalog を読まなくても route の候補を選べるように、AC、light、fan、door、
+vacuum の代表 action は route metadata 付きの固定ショートカットとして表示されます。ショートカットは token や
+Home Assistant の URL/entity ID を埋め込まず、押されたときだけ既存の認証済み action API を呼びます。
+light / fan は command stimulus として復帰を要求しない候補です。door は `door_open` に対して
+`door_close` を復帰候補として扱い、vacuum は `vacuum_return` を復帰/終端候補として扱います。
+`vacuum_start`、`vacuum_pause`、`door_stop` は別/条件付き row として扱い、この固定ショートカットには
+含めません。
 
 ## 状態確認
 

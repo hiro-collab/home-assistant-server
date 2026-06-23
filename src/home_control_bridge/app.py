@@ -183,8 +183,98 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
   const actionsNode = document.getElementById("actions");
   const outputNode = document.getElementById("output");
   const reviewedRouteActions = [
-    { action_id: "aircon_cool", label: "AC cool route action", route_shortcut_class: "reviewed_first_action_candidate" },
-    { action_id: "aircon_hvac_off", label: "AC off restore route action", route_shortcut_class: "reviewed_restore_candidate" },
+    {
+      action_id: "aircon_cool",
+      label: "AC cool route action",
+      route_shortcut_class: "reviewed_first_action_candidate",
+      command_stimulus_class: "ha_visible_mode_command_candidate",
+      restore_required: true,
+      restore_action_id: "aircon_hvac_off",
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "positive1_restore1",
+      timing_estimate_class: "measurement_required",
+    },
+    {
+      action_id: "aircon_hvac_off",
+      label: "AC off restore route action",
+      route_shortcut_class: "reviewed_restore_candidate",
+      command_stimulus_class: "ha_visible_mode_restore_candidate",
+      restore_required: false,
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "restore1",
+      timing_estimate_class: "measurement_required",
+    },
+    {
+      action_id: "light_on",
+      label: "Light on route action",
+      route_shortcut_class: "reviewed_light_command_stimulus_candidate",
+      command_stimulus_class: "command_stimulus_without_restore_required",
+      restore_required: false,
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "positive1_restore0",
+      timing_estimate_class: "measurement_required",
+    },
+    {
+      action_id: "light_off",
+      label: "Light off route action",
+      route_shortcut_class: "reviewed_light_command_stimulus_candidate",
+      command_stimulus_class: "command_stimulus_without_restore_required",
+      restore_required: false,
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "positive1_restore0",
+      timing_estimate_class: "measurement_required",
+    },
+    {
+      action_id: "fan_on",
+      label: "Fan on route action",
+      route_shortcut_class: "reviewed_fan_command_stimulus_candidate",
+      command_stimulus_class: "command_stimulus_without_restore_required",
+      restore_required: false,
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "positive1_restore0",
+      timing_estimate_class: "measurement_required",
+    },
+    {
+      action_id: "fan_off",
+      label: "Fan off route action",
+      route_shortcut_class: "reviewed_fan_command_stimulus_candidate",
+      command_stimulus_class: "command_stimulus_without_restore_required",
+      restore_required: false,
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "positive1_restore0",
+      timing_estimate_class: "measurement_required",
+    },
+    {
+      action_id: "door_open",
+      label: "Door open route action",
+      route_shortcut_class: "reviewed_door_open_candidate",
+      command_stimulus_class: "position_command_open_then_close",
+      restore_required: true,
+      restore_action_id: "door_close",
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "open1_close1",
+      timing_estimate_class: "measurement_required",
+    },
+    {
+      action_id: "door_close",
+      label: "Door close route action",
+      route_shortcut_class: "reviewed_door_close_restore_candidate",
+      command_stimulus_class: "position_command_close_or_restore",
+      restore_required: false,
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "close1",
+      timing_estimate_class: "measurement_required",
+    },
+    {
+      action_id: "vacuum_return",
+      label: "Vacuum return route action",
+      route_shortcut_class: "reviewed_vacuum_return_restore_candidate",
+      command_stimulus_class: "terminal_return_command_candidate",
+      restore_required: false,
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "return1",
+      timing_estimate_class: "measurement_required",
+    },
   ];
 
   const setStatus = (text) => {
@@ -269,9 +359,13 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
     appendMetaRow(meta, "verification", action.verification_mode);
     appendMetaRow(meta, "readiness", action.live_test_readiness);
     appendMetaRow(meta, "proof", action.proof_ceiling);
+    appendMetaRow(meta, "stimulus", action.command_stimulus_class);
+    appendMetaRow(meta, "restore required", action.restore_required);
     appendMetaRow(meta, "restore", action.restore_action_id);
     appendMetaRow(meta, "stop", action.stop_action_id);
     appendMetaRow(meta, "route", action.route_shortcut_class);
+    appendMetaRow(meta, "count bound", action.later_runtime_count_bound);
+    appendMetaRow(meta, "timing", action.timing_estimate_class);
     appendMetaRow(meta, "wait", `${action.settle_seconds || 0}s / ${action.timeout_seconds || 0}s`);
     appendMetaRow(meta, "blockers", action.live_test_blockers);
     article.append(title, actionId, meta);

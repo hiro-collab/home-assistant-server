@@ -355,8 +355,24 @@ def test_operator_console_is_local_ui_without_embedded_secrets(config, token, tm
     assert "/execute" in body
     assert "Bridge API token" in body
     assert 'id="route-actions"' in body
-    assert "aircon_cool" in body
-    assert "aircon_hvac_off" in body
+    for action_id in (
+        "aircon_cool",
+        "aircon_hvac_off",
+        "light_on",
+        "light_off",
+        "fan_on",
+        "fan_off",
+        "door_open",
+        "door_close",
+        "vacuum_return",
+    ):
+        assert action_id in body
+    assert "reviewed_light_command_stimulus_candidate" in body
+    assert "reviewed_vacuum_return_restore_candidate" in body
+    assert "command_stimulus_without_restore_required" in body
+    assert "position_command_open_then_close" in body
+    assert "terminal_return_command_candidate" in body
+    assert "operator_shortcut_submission_summary_only" in body
     assert token not in body
     assert "HOME_CONTROL_API_TOKEN" not in body
     assert "local-test-token" not in body
