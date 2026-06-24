@@ -440,16 +440,12 @@ def action_preview_payload(action_id: str, action: ActionConfig) -> dict[str, An
 def action_control_type(action: ActionConfig) -> ControlType:
     if action.control_type is not None:
         return action.control_type
-    if action.expected_effect is not None:
-        return "stateful_target"
     return "script_wrapper"
 
 
 def action_verification_mode(action: ActionConfig) -> VerificationMode:
     if action.verification is not None:
         return action.verification.mode
-    if action.expected_effect is not None:
-        return "ha_state"
     return "command_ack_only"
 
 
@@ -458,8 +454,6 @@ def action_state_authority(action: ActionConfig) -> StateAuthority:
         return action.state_authority
 
     mode = action_verification_mode(action)
-    if mode == "ha_state":
-        return "ha_entity"
     if mode == "external_observation":
         return "external_sensor"
     if mode == "manual_confirmation":
@@ -472,7 +466,9 @@ def action_state_authority(action: ActionConfig) -> StateAuthority:
 def action_state_tracking_status(action: ActionConfig) -> StateTrackingStatus:
     mode = action_verification_mode(action)
     if mode == "ha_state":
-        return "tracked" if action.expected_effect is not None else "unsupported"
+        if action.state_authority == "ha_entity" and action.expected_effect is not None:
+            return "tracked"
+        return "unsupported"
     if mode == "external_observation":
         return "external_required"
     if mode == "manual_confirmation":

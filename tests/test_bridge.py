@@ -617,7 +617,7 @@ def test_action_state_ack_only_action_does_not_call_home_assistant(config, token
     assert ha.state_calls == []
 
 
-def test_external_observation_action_ignores_legacy_expected_effect(config, token, tmp_path):
+def test_external_observation_action_ignores_expected_effect(config, token, tmp_path):
     raw = config.model_dump(mode="json")
     raw["actions"]["light_on"]["control_type"] = "stateless_toggle"
     raw["actions"]["light_on"]["state_authority"] = "open_loop"
@@ -652,7 +652,7 @@ def test_external_observation_action_ignores_legacy_expected_effect(config, toke
     assert ha.state_calls == []
 
 
-def test_command_ack_only_action_ignores_legacy_expected_effect(config, token, tmp_path):
+def test_command_ack_only_action_ignores_expected_effect(config, token, tmp_path):
     raw = config.model_dump(mode="json")
     raw["actions"]["curtain_close"]["control_type"] = "stateless_command"
     raw["actions"]["curtain_close"]["state_authority"] = "submitted_only"
@@ -1619,6 +1619,30 @@ def test_source_no_live_fuzz_ha_state_without_expected_effect_is_unsupported(con
     assert payload["state_tracking"] == "unsupported"
     assert payload["expected_states"] == []
     assert "expected_effect" not in payload
+
+
+def test_source_no_live_fuzz_expected_effect_without_explicit_metadata_is_not_tracked(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"].pop("control_type")
+    raw["actions"]["light_on"].pop("state_authority")
+    raw["actions"]["light_on"].pop("verification")
+
+    loaded = BridgeConfig.model_validate(raw)
+    payload = action_preview_payload("light_on", loaded.actions["light_on"])
+
+    assert payload["control_type"] == "script_wrapper"
+    assert payload["state_authority"] == "submitted_only"
+    assert payload["verification_mode"] == "command_ack_only"
+    assert payload["state_tracking"] == "ack_only"
+    assert payload["expected_states"] == []
+    assert "expected_effect" not in payload
+
+    client, ha, _, _ = make_client(loaded, token, tmp_path)
+    state_response = client.get("/actions/light_on/state", headers=auth_headers(token))
+
+    assert state_response.status_code == 200
+    assert state_response.json()["state_tracking"] == "ack_only"
+    assert ha.state_calls == []
 
 
 def test_source_no_live_fuzz_ack_only_with_expected_effect_is_not_tracked(config):
