@@ -171,8 +171,7 @@ def test_example_config_loads_with_standard_appliance_actions_and_demo_climate_c
     loaded = load_config(config_path)
 
     standard_actions = {
-        "light_on",
-        "light_off",
+        "light_toggle",
         "fan_on",
         "fan_off",
         "aircon_on",
@@ -186,17 +185,13 @@ def test_example_config_loads_with_standard_appliance_actions_and_demo_climate_c
     }
     assert standard_actions.issubset(loaded.actions)
 
-    assert loaded.actions["light_on"].control_type == "stateless_toggle"
-    assert loaded.actions["light_on"].state_authority == "open_loop"
-    assert loaded.actions["light_on"].verification is not None
-    assert loaded.actions["light_on"].verification.mode == "external_observation"
-    assert loaded.actions["light_on"].expected_effect is None
-    assert loaded.actions["light_on"].live_test_candidate is True
-    assert loaded.actions["light_on"].restore_required is False
-    assert loaded.actions["light_off"].control_type == "stateless_toggle"
-    assert loaded.actions["light_off"].expected_effect is None
-    assert loaded.actions["light_off"].live_test_candidate is True
-    assert loaded.actions["light_off"].restore_required is False
+    assert loaded.actions["light_toggle"].control_type == "stateless_toggle"
+    assert loaded.actions["light_toggle"].state_authority == "open_loop"
+    assert loaded.actions["light_toggle"].verification is not None
+    assert loaded.actions["light_toggle"].verification.mode == "external_observation"
+    assert loaded.actions["light_toggle"].expected_effect is None
+    assert loaded.actions["light_toggle"].live_test_candidate is True
+    assert loaded.actions["light_toggle"].restore_required is False
 
     for action_id in ("fan_on", "fan_off", "aircon_on", "aircon_off"):
         action = loaded.actions[action_id]
@@ -206,7 +201,7 @@ def test_example_config_loads_with_standard_appliance_actions_and_demo_climate_c
         assert action.verification.mode == "command_ack_only"
         assert action.expected_effect is None
 
-    for action_id in ("light_on", "light_off", "fan_on", "fan_off"):
+    for action_id in ("light_toggle", "fan_on", "fan_off"):
         payload = action_preview_payload(action_id, loaded.actions[action_id])
         assert payload["live_test_readiness"] == "test_now"
         assert payload["restore_required"] is False
@@ -318,9 +313,9 @@ def test_health_is_available_without_bridge_token(config, token, tmp_path):
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert response.json()["actions_count"] == 2
-    assert response.json()["config_profile"] == "demo"
+    assert response.json()["config_profile"] == "custom"
     assert response.json()["demo_mappings_present"] is True
-    assert response.json()["light_demo_mappings_present"] is True
+    assert response.json()["light_demo_mappings_present"] is False
     assert response.json()["fault_mode"] is False
     assert response.json()["fault_rules_count"] == 0
 
@@ -335,7 +330,7 @@ def test_health_exposes_redacted_config_profile_without_paths(config, token, tmp
     body = response.json()
     serialized = json.dumps(body)
     assert body["config_profile"] == "local"
-    assert body["light_demo_mappings_present"] is True
+    assert body["light_demo_mappings_present"] is False
     assert "home-control.live.yaml" not in serialized
     assert "light.demo_room" not in serialized
     assert "HOME_ASSISTANT_TOKEN" not in serialized
@@ -358,8 +353,7 @@ def test_operator_console_is_local_ui_without_embedded_secrets(config, token, tm
     for action_id in (
         "aircon_cool",
         "aircon_hvac_off",
-        "light_on",
-        "light_off",
+        "light_toggle",
         "fan_on",
         "fan_off",
         "door_open",
@@ -367,7 +361,7 @@ def test_operator_console_is_local_ui_without_embedded_secrets(config, token, tm
         "vacuum_return",
     ):
         assert action_id in body
-    assert "reviewed_light_command_stimulus_candidate" in body
+    assert "reviewed_light_toggle_command_stimulus_candidate" in body
     assert "reviewed_vacuum_return_restore_candidate" in body
     assert "command_stimulus_without_restore_required" in body
     assert "position_command_open_then_close" in body
@@ -1595,7 +1589,7 @@ def test_source_no_live_fuzz_classifies_open_loop_toggles_as_external_required()
     config_path = Path(__file__).resolve().parents[1] / "config" / "home-control.example.yaml"
     loaded = load_config(config_path)
 
-    for action_id in ("light_on", "light_off"):
+    for action_id in ("light_toggle",):
         action = loaded.actions[action_id]
         payload = action_preview_payload(action_id, action)
 

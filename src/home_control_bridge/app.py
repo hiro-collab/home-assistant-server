@@ -205,24 +205,14 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
       timing_estimate_class: "measurement_required",
     },
     {
-      action_id: "light_on",
-      label: "Submit light on command",
-      route_shortcut_class: "reviewed_light_command_stimulus_candidate",
-      command_stimulus_class: "command_stimulus_without_restore_required",
+      action_id: "light_toggle",
+      label: "Submit light toggle command",
+      route_shortcut_class: "reviewed_light_toggle_command_stimulus_candidate",
+      command_stimulus_class: "toggle_command_stimulus_without_directional_state",
       restore_required: false,
       proof_ceiling: "operator_shortcut_submission_summary_only",
-      later_runtime_count_bound: "positive1_restore0",
-      timing_estimate_class: "measurement_required",
-    },
-    {
-      action_id: "light_off",
-      label: "Submit light off command",
-      route_shortcut_class: "reviewed_light_command_stimulus_candidate",
-      command_stimulus_class: "command_stimulus_without_restore_required",
-      restore_required: false,
-      proof_ceiling: "operator_shortcut_submission_summary_only",
-      later_runtime_count_bound: "positive1_restore0",
-      timing_estimate_class: "measurement_required",
+      later_runtime_count_bound: "toggle1_restore0",
+      timing_estimate_class: "external_observation_required",
     },
     {
       action_id: "fan_on",
@@ -1039,7 +1029,7 @@ def _demo_mappings_present(config: BridgeConfig) -> bool:
 
 def _light_demo_mappings_present(config: BridgeConfig) -> bool:
     return any(
-        action_id in {"light_on", "light_off"} and action.ha_script.startswith("script.demo_")
+        action_id == "light_toggle" and action.ha_script.startswith("script.demo_")
         for action_id, action in config.actions.items()
     )
 
