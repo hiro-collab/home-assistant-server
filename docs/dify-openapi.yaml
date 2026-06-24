@@ -58,7 +58,7 @@ paths:
           description: Action is not allowlisted
   /actions/{action_id}/state:
     get:
-      summary: Read the Home Assistant state for an action expected effect without exposing entity ids
+      summary: Read the redacted HA-visible state-check result for an allowlisted action
       parameters:
         - $ref: "#/components/parameters/ActionId"
       responses:
@@ -153,15 +153,15 @@ components:
         state_authority:
           type: string
           enum: [ha_entity, ha_inferred, external_sensor, manual, open_loop, submitted_only, unknown]
-          description: Source of state authority. Inferred or open-loop state is not physical proof.
+          description: Metadata source for state checks; not current appliance state or physical proof.
         verification_mode:
           type: string
           enum: [ha_state, external_observation, command_ack_only, manual_confirmation, unsupported]
-          description: Proof layer expected for this action.
+          description: Verification layer metadata for this action.
         state_tracking:
           type: string
           enum: [tracked, external_required, ack_only, manual_required, unsupported]
-          description: Whether this action can produce Home Assistant state proof.
+          description: Whether explicit metadata supports HA-visible state checking.
         verification:
           $ref: "#/components/schemas/Verification"
           nullable: true
@@ -176,7 +176,7 @@ components:
           type: array
           items:
             type: string
-          description: States that count as HA-state proof for this action. Includes expected_effect.expected_state when tracked.
+          description: States accepted by the read-only state check. Includes expected_effect.expected_state when tracked.
         settle_seconds:
           type: number
           format: float
@@ -236,7 +236,7 @@ components:
           type: array
           items:
             type: string
-          description: States accepted for the HA-state proof check.
+          description: States accepted by the HA-visible state check.
         actual_state:
           type: string
           nullable: true
@@ -308,7 +308,7 @@ components:
         entity_id:
           type: string
           nullable: true
-          description: Expected-effect entity configured for later observation correlation.
+          description: Expected-effect target identifier for later observation correlation; authenticated local API only.
         expected_state:
           type: string
           nullable: true
@@ -320,15 +320,15 @@ components:
         state_authority:
           type: string
           nullable: true
-          description: Source of state authority. Inferred or open-loop state is not physical proof.
+          description: Metadata source for state checks; not current appliance state or physical proof.
         verification_mode:
           type: string
           nullable: true
-          description: Proof layer expected for this action.
+          description: Verification layer metadata for this action.
         state_tracking:
           type: string
           nullable: true
-          description: Whether this action can produce Home Assistant state proof.
+          description: Whether explicit metadata supports HA-visible state checking.
         expected_effect:
           $ref: "#/components/schemas/ExpectedEffect"
           nullable: true
@@ -339,7 +339,7 @@ components:
           type: array
           items:
             type: string
-          description: States that count as HA-state proof for this action.
+          description: States accepted by the HA-visible state check.
         settle_seconds:
           type: number
           format: float
@@ -371,7 +371,7 @@ components:
           type: array
           items:
             type: string
-          description: Additional HA states accepted as proof; expected_effect.expected_state is included separately.
+          description: Additional HA-visible states accepted by the state check; expected_effect.expected_state is included separately.
         settle_seconds:
           type: number
           format: float
