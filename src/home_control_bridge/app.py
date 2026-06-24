@@ -167,10 +167,10 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
   <h1>Home Control Operator</h1>
   <div class="toolbar">
     <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Bridge API token">
-    <button id="load" class="primary" type="button">Load actions</button>
+    <button id="load" class="primary" type="button">Load command metadata</button>
   </div>
-  <p id="status" class="status">Enter the local bridge token, then load the allowlisted actions.</p>
-  <section id="route-actions" class="grid" aria-label="Reviewed route action shortcuts"></section>
+  <p id="status" class="status">Enter the local bridge token, then load the allowlisted command metadata.</p>
+  <section id="route-actions" class="grid" aria-label="Reviewed command shortcuts"></section>
   <section id="actions" class="grid" aria-live="polite"></section>
   <pre id="output" aria-live="polite"></pre>
 </main>
@@ -185,7 +185,7 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
   const reviewedRouteActions = [
     {
       action_id: "aircon_cool",
-      label: "AC cool route action",
+      label: "Request AC cool",
       route_shortcut_class: "reviewed_first_action_candidate",
       command_stimulus_class: "ha_visible_mode_command_candidate",
       restore_required: true,
@@ -196,7 +196,7 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
     },
     {
       action_id: "aircon_hvac_off",
-      label: "AC off restore route action",
+      label: "Request AC off restore",
       route_shortcut_class: "reviewed_restore_candidate",
       command_stimulus_class: "ha_visible_mode_restore_candidate",
       restore_required: false,
@@ -206,7 +206,7 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
     },
     {
       action_id: "light_on",
-      label: "Light on route action",
+      label: "Submit light on command",
       route_shortcut_class: "reviewed_light_command_stimulus_candidate",
       command_stimulus_class: "command_stimulus_without_restore_required",
       restore_required: false,
@@ -216,7 +216,7 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
     },
     {
       action_id: "light_off",
-      label: "Light off route action",
+      label: "Submit light off command",
       route_shortcut_class: "reviewed_light_command_stimulus_candidate",
       command_stimulus_class: "command_stimulus_without_restore_required",
       restore_required: false,
@@ -226,7 +226,7 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
     },
     {
       action_id: "fan_on",
-      label: "Fan on route action",
+      label: "Submit fan on command",
       route_shortcut_class: "reviewed_fan_command_stimulus_candidate",
       command_stimulus_class: "command_stimulus_without_restore_required",
       restore_required: false,
@@ -236,7 +236,7 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
     },
     {
       action_id: "fan_off",
-      label: "Fan off route action",
+      label: "Submit fan off command",
       route_shortcut_class: "reviewed_fan_command_stimulus_candidate",
       command_stimulus_class: "command_stimulus_without_restore_required",
       restore_required: false,
@@ -246,7 +246,7 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
     },
     {
       action_id: "door_open",
-      label: "Door open route action",
+      label: "Request door open movement",
       route_shortcut_class: "reviewed_door_open_candidate",
       command_stimulus_class: "position_command_open_then_close",
       restore_required: true,
@@ -257,7 +257,7 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
     },
     {
       action_id: "door_close",
-      label: "Door close route action",
+      label: "Request door close movement",
       route_shortcut_class: "reviewed_door_close_restore_candidate",
       command_stimulus_class: "position_command_close_or_restore",
       restore_required: false,
@@ -267,7 +267,7 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
     },
     {
       action_id: "vacuum_return",
-      label: "Vacuum return route action",
+      label: "Request vacuum return",
       route_shortcut_class: "reviewed_vacuum_return_restore_candidate",
       command_stimulus_class: "terminal_return_command_candidate",
       restore_required: false,
@@ -354,28 +354,28 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
     actionId.textContent = action.action_id;
     const meta = document.createElement("dl");
     meta.className = "meta";
-    appendMetaRow(meta, "control", action.control_type);
-    appendMetaRow(meta, "tracking", action.state_tracking);
-    appendMetaRow(meta, "verification", action.verification_mode);
-    appendMetaRow(meta, "readiness", action.live_test_readiness);
-    appendMetaRow(meta, "proof", action.proof_ceiling);
-    appendMetaRow(meta, "stimulus", action.command_stimulus_class);
+    appendMetaRow(meta, "control class", action.control_type);
+    appendMetaRow(meta, "tracking metadata", action.state_tracking);
+    appendMetaRow(meta, "verification mode", action.verification_mode);
+    appendMetaRow(meta, "live-test readiness", action.live_test_readiness);
+    appendMetaRow(meta, "proof ceiling", action.proof_ceiling);
+    appendMetaRow(meta, "stimulus class", action.command_stimulus_class);
     appendMetaRow(meta, "restore required", action.restore_required);
-    appendMetaRow(meta, "restore", action.restore_action_id);
-    appendMetaRow(meta, "stop", action.stop_action_id);
-    appendMetaRow(meta, "route", action.route_shortcut_class);
+    appendMetaRow(meta, "restore action", action.restore_action_id);
+    appendMetaRow(meta, "stop action", action.stop_action_id);
+    appendMetaRow(meta, "route class", action.route_shortcut_class);
     appendMetaRow(meta, "count bound", action.later_runtime_count_bound);
-    appendMetaRow(meta, "timing", action.timing_estimate_class);
-    appendMetaRow(meta, "wait", `${action.settle_seconds || 0}s / ${action.timeout_seconds || 0}s`);
-    appendMetaRow(meta, "blockers", action.live_test_blockers);
+    appendMetaRow(meta, "timing estimate", action.timing_estimate_class);
+    appendMetaRow(meta, "wait window", `${action.settle_seconds || 0}s / ${action.timeout_seconds || 0}s`);
+    appendMetaRow(meta, "readiness blockers", action.live_test_blockers);
     article.append(title, actionId, meta);
     const row = document.createElement("div");
     row.className = "row";
 
     const stateButton = document.createElement("button");
     stateButton.type = "button";
-    stateButton.textContent = "State";
-    stateButton.onclick = () => withResult(`state ${action.action_id}`, () => callBridge(`/actions/${action.action_id}/state`));
+    stateButton.textContent = "State check";
+    stateButton.onclick = () => withResult(`state check ${action.action_id}`, () => callBridge(`/actions/${action.action_id}/state`));
     row.appendChild(stateButton);
 
     const previewButton = document.createElement("button");
@@ -437,7 +437,7 @@ OPERATOR_CONSOLE_HTML = """<!doctype html>
   }
 
   async function loadActions() {
-    const actions = await withResult("load actions", () => callBridge("/actions"));
+    const actions = await withResult("load command metadata", () => callBridge("/actions"));
     actionsNode.textContent = "";
     if (!Array.isArray(actions)) {
       return;

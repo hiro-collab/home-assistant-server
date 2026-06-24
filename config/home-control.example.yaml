@@ -211,7 +211,7 @@ actions:
     label: "掃除機を充電台に戻す"
     ha_script: "script.demo_vacuum_return"
     confirm_required: true
-    response_text: "掃除機を充電台に戻しました。"
+    response_text: "掃除機を充電台に戻す操作を送信しました。HA の掃除機状態を確認してください。"
     control_type: "job_command"
     state_authority: "ha_entity"
     live_test_candidate: true
@@ -260,7 +260,7 @@ actions:
     label: "エアコンを冷房にする"
     ha_script: "script.demo_aircon_cool"
     confirm_required: true
-    response_text: "エアコンを冷房にしました。"
+    response_text: "エアコンを冷房にする操作を送信しました。HA の空調状態を確認してください。"
     control_type: "mode_command"
     state_authority: "ha_entity"
     live_test_candidate: true
@@ -280,7 +280,7 @@ actions:
     label: "エアコンを停止する"
     ha_script: "script.demo_aircon_hvac_off"
     confirm_required: true
-    response_text: "エアコンを停止しました。"
+    response_text: "エアコンを停止する操作を送信しました。HA の空調状態を確認してください。"
     control_type: "mode_command"
     state_authority: "ha_entity"
     live_test_candidate: true
@@ -301,7 +301,7 @@ actions:
     label: "プロジェクションモードにする"
     ha_script: "script.projection_mode"
     confirm_required: true
-    response_text: "プロジェクションモードにしました。"
+    response_text: "プロジェクションモードにする操作を送信しました。"
     control_type: "stateless_command"
     state_authority: "submitted_only"
     proof_ceiling: "not_home_control_appliance_coverage_row"
