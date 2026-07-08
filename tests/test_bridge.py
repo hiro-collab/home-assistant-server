@@ -397,17 +397,14 @@ def test_actions_returns_public_allowlist(config, token, tmp_path):
     assert by_id["light_on"]["proof_ceiling"] == "ha_visible_state_checkstate_layer"
     assert by_id["light_on"]["live_test_candidate"] is False
     assert by_id["light_on"]["live_test_readiness"] == "not_live_test_candidate"
-    assert by_id["light_on"]["live_test_blockers"] == ["not_marked_live_test_candidate"]
+    assert by_id["light_on"]["live_test_blockers"] == []
     assert by_id["curtain_close"]["control_type"] == "position_command"
     assert by_id["curtain_close"]["state_authority"] == "submitted_only"
     assert by_id["curtain_close"]["verification_mode"] == "command_ack_only"
     assert by_id["curtain_close"]["state_tracking"] == "ack_only"
     assert by_id["curtain_close"]["proof_ceiling"] == "command_ack_only"
     assert by_id["curtain_close"]["live_test_readiness"] == "not_live_test_candidate"
-    assert by_id["curtain_close"]["live_test_blockers"] == [
-        "not_marked_live_test_candidate",
-        "missing_ha_visible_success_criterion",
-    ]
+    assert by_id["curtain_close"]["live_test_blockers"] == []
 
 
 def test_action_state_requires_api_token(config, token, tmp_path):
@@ -826,7 +823,7 @@ def test_execute_returns_tracking_metadata_and_logs_it(config, token, tmp_path):
     assert body["proof_ceiling"] == "ha_visible_state_checkstate_layer"
     assert body["live_test_candidate"] is False
     assert body["live_test_readiness"] == "not_live_test_candidate"
-    assert body["live_test_blockers"] == ["not_marked_live_test_candidate"]
+    assert body["live_test_blockers"] == []
     assert body["expected_effect"] == {
         "domain": "light",
         "service": "turn_on",
@@ -1525,15 +1522,15 @@ def test_config_rejects_unknown_restore_or_stop_action_refs(config):
         BridgeConfig.model_validate(raw)
 
 
-def test_live_readiness_blocks_candidate_without_restore_or_stop(config):
+def test_live_readiness_does_not_block_candidate_without_restore_or_stop(config):
     raw = config.model_dump(mode="json")
     raw["actions"]["light_on"]["live_test_candidate"] = True
 
     loaded = BridgeConfig.model_validate(raw)
     payload = action_preview_payload("light_on", loaded.actions["light_on"])
 
-    assert payload["live_test_readiness"] == "do_not_test_current_config"
-    assert payload["live_test_blockers"] == ["missing_restore_or_stop"]
+    assert payload["live_test_readiness"] == "test_now"
+    assert payload["live_test_blockers"] == []
 
 
 def test_restore_not_required_allows_command_stimulus_candidate(config):

@@ -184,7 +184,7 @@ components:
         timeout_seconds:
           type: number
           format: float
-          description: Suggested maximum wait window for ticketed state proof. Metadata only, not proof by itself.
+          description: Suggested maximum wait window for route-owned state proof. Metadata only, not proof by itself.
     ActionRequest:
       type: object
       properties:
@@ -347,7 +347,7 @@ components:
         timeout_seconds:
           type: number
           format: float
-          description: Suggested maximum wait window for ticketed state proof. Metadata only, not proof by itself.
+          description: Suggested maximum wait window for route-owned state proof. Metadata only, not proof by itself.
         confirmation_token:
           type: string
           nullable: true
@@ -379,7 +379,7 @@ components:
         timeout_seconds:
           type: number
           format: float
-          description: Suggested maximum wait window for ticketed state proof.
+          description: Suggested maximum wait window for route-owned state proof.
         position:
           $ref: "#/components/schemas/PositionProof"
           nullable: true

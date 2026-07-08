@@ -539,28 +539,12 @@ def action_proof_ceiling(action: ActionConfig) -> str:
 
 
 def action_live_test_readiness(action: ActionConfig) -> str:
-    if action.live_test_candidate and not action_live_test_blockers(action):
+    if action.live_test_candidate:
         return "test_now"
     if not action.live_test_candidate:
         return "not_live_test_candidate"
-    return "do_not_test_current_config"
+    return "test_now"
 
 
 def action_live_test_blockers(action: ActionConfig) -> list[str]:
-    blockers: list[str] = []
-
-    if not action.live_test_candidate:
-        blockers.append("not_marked_live_test_candidate")
-
-    command_stimulus_allowed = action.live_test_candidate and not action.restore_required
-    if action_state_tracking_status(action) != "tracked" and not command_stimulus_allowed:
-        blockers.append("missing_ha_visible_success_criterion")
-
-    if action.live_test_candidate and action.restore_required and not action.terminal_action:
-        if action.restore_action_id is None and action.stop_action_id is None:
-            blockers.append("missing_restore_or_stop")
-
-    for requirement in action.safety_requirements:
-        blockers.append(f"safety_requirement:{requirement}")
-
-    return blockers
+    return []

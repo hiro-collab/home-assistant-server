@@ -56,7 +56,7 @@ actions:
   #
   # Keep open-loop or command-only devices out of HA state proof. Promote an
   # action to verification.mode: ha_state only after the target entity can be
-  # read back reliably and a ticketed execute/wait/CheckState pass proves it.
+  # read back reliably and an exact execute/wait/CheckState pass proves it.
   light_toggle:
     label: "照明トグルを送信"
     ha_script: "script.demo_light_toggle"
