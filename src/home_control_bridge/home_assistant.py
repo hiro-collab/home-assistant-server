@@ -10,10 +10,17 @@ from .config import HomeAssistantConfig
 
 
 class HomeAssistantError(RuntimeError):
-    def __init__(self, safe_message: str, *, log_detail: str | None = None) -> None:
+    def __init__(
+        self,
+        safe_message: str,
+        *,
+        log_detail: str | None = None,
+        submission_outcome: str = "failed_before_submit",
+    ) -> None:
         super().__init__(safe_message)
         self.safe_message = safe_message
         self.log_detail = log_detail or safe_message
+        self.submission_outcome = submission_outcome
 
 
 @dataclass(frozen=True)
@@ -48,22 +55,55 @@ class HomeAssistantClient:
                 "error": exc.__class__.__name__,
             }
 
-    async def turn_on_script(self, script_entity_id: str) -> dict[str, Any]:
+    async def turn_on_script(
+        self,
+        script_entity_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         url = f"{self.config.base_url}/api/services/script/turn_on"
         payload = {"entity_id": script_entity_id}
+        timeout = self.config.timeout_seconds
+        if timeout_seconds is not None:
+            timeout = min(timeout, timeout_seconds)
         try:
-            async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(url, headers=self._headers(), json=payload)
         except httpx.HTTPError as exc:
+            before_submit = isinstance(
+                exc,
+                (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
+            )
             raise HomeAssistantError(
                 "Home Assistant request failed.",
                 log_detail=f"Home Assistant request failed: {exc.__class__.__name__}",
+                submission_outcome=(
+                    "failed_before_submit"
+                    if before_submit
+                    else "submission_outcome_unknown"
+                ),
             ) from exc
 
         if not response.is_success:
+            definitive_rejection_statuses = {
+                400,
+                401,
+                403,
+                404,
+                405,
+                413,
+                415,
+                422,
+            }
+            outcome = (
+                "failed_before_submit"
+                if response.status_code in definitive_rejection_statuses
+                else "submission_outcome_unknown"
+            )
             raise HomeAssistantError(
                 "Home Assistant returned an error.",
                 log_detail=f"Home Assistant returned HTTP {response.status_code}.",
+                submission_outcome=outcome,
             )
 
         try:

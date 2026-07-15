@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from time import monotonic
 from uuid import UUID
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+import home_control_bridge.app as app_module
 from home_control_bridge.app import create_app
 from home_control_bridge.audit import JsonlAuditLogger
 from home_control_bridge.config import (
@@ -18,7 +22,11 @@ from home_control_bridge.config import (
     load_config,
 )
 from home_control_bridge.faults import FaultContext, MAX_FAULT_ATTEMPT_STATE, evaluate_fault
-from home_control_bridge.home_assistant import HomeAssistantEntityState
+from home_control_bridge.home_assistant import (
+    HomeAssistantClient,
+    HomeAssistantEntityState,
+    HomeAssistantError,
+)
 
 
 class FakeUdpEventSender:
@@ -34,22 +42,30 @@ class FakeUdpEventSender:
 
 
 class FakeHomeAssistant:
-    def __init__(self, *, fail: bool = False, fail_state: bool = False, states: dict[str, object] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        fail_state: bool = False,
+        states: dict[str, object] | None = None,
+        submission_outcome: str = "failed_before_submit",
+    ) -> None:
         self.calls: list[str] = []
+        self.timeouts: list[float | None] = []
         self.state_calls: list[str] = []
         self.fail = fail
         self.fail_state = fail_state
+        self.submission_outcome = submission_outcome
         self.states = states or {"light.demo_room": "on"}
 
     async def check_connection(self):
         return {"ok": True, "status_code": 200}
 
-    async def turn_on_script(self, script_entity_id: str):
+    async def turn_on_script(self, script_entity_id: str, *, timeout_seconds=None):
         self.calls.append(script_entity_id)
+        self.timeouts.append(timeout_seconds)
         if self.fail:
-            from home_control_bridge.home_assistant import HomeAssistantError
-
-            raise HomeAssistantError("boom")
+            raise HomeAssistantError("boom", submission_outcome=self.submission_outcome)
         return {"status_code": 200, "body": [{"entity_id": script_entity_id}]}
 
     async def get_entity_state(self, entity_id: str):
@@ -127,12 +143,17 @@ def fault_mode(monkeypatch, token):
     monkeypatch.setenv("HOME_CONTROL_FAULT_MODE", "1")
 
 
-def make_client(config, token, tmp_path, ha=None, udp=None):
+def make_app(config, token, tmp_path, ha=None, udp=None):
     del token
     ha = ha or FakeHomeAssistant()
     logger = JsonlAuditLogger(str(tmp_path / "events.jsonl"))
     app = create_app(config=config, ha_client=ha, audit_logger=logger, udp_event_sender=udp)
-    return TestClient(app), ha, tmp_path / "events.jsonl", udp
+    return app, ha, tmp_path / "events.jsonl", udp
+
+
+def make_client(config, token, tmp_path, ha=None, udp=None):
+    app, ha, log_path, udp = make_app(config, token, tmp_path, ha=ha, udp=udp)
+    return TestClient(app), ha, log_path, udp
 
 
 def auth_headers(token: str) -> dict[str, str]:
@@ -795,6 +816,8 @@ def test_post_body_is_optional(config, token, tmp_path):
     assert response.status_code == 200
     assert response.json()["executed"] is True
     assert ha.calls == ["script.demo_light_on"]
+    assert len(ha.timeouts) == 1
+    assert 0 < ha.timeouts[0] <= config.home_assistant.timeout_seconds
 
 
 def test_execute_returns_tracking_metadata_and_logs_it(config, token, tmp_path):
@@ -1172,6 +1195,363 @@ def test_duplicate_request_id_is_not_executed_twice(config, token, tmp_path):
     assert ha.calls == ["script.demo_light_on"]
     logs = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert any(log["event"] == "execute_duplicate_request" for log in logs)
+
+
+def test_thought_core_execution_propagates_deadline_and_tracking_without_state_read(
+    config,
+    token,
+    tmp_path,
+):
+    client, ha, _, _ = make_client(config, token, tmp_path)
+    request_id = "turn-light-attempt-1"
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={
+            "source": "thought-core",
+            "request_id": request_id,
+            "deadline_monotonic_s": monotonic() + 5.0,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["execution_lifecycle_class"] == "submission_completed"
+    assert body["submission_count"] == 1
+    assert body["terminal"] is True
+    assert ha.calls == ["script.demo_light_on"]
+    assert ha.state_calls == []
+
+    tracking = client.get(
+        f"/executions/{body['execution_id']}",
+        headers=auth_headers(token),
+        params={"action_id": "light_on", "request_id": request_id},
+    )
+    assert tracking.status_code == 200
+    assert tracking.json() == {
+        "ok": True,
+        "found": True,
+        "action_match": True,
+        "request_match": True,
+        "execution_lifecycle_class": "submission_completed",
+        "submission_count": 1,
+        "terminal": True,
+        "elapsed_ms": tracking.json()["elapsed_ms"],
+        "proof_ceiling": "bridge_submission_tracking_only",
+    }
+    assert tracking.json()["elapsed_ms"] >= 0
+    serialized = json.dumps(tracking.json())
+    assert body["execution_id"] not in serialized
+    assert request_id not in serialized
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "source": "thought-core",
+            "request_id": "private\nmarker",
+            "deadline_monotonic_s": 1.0,
+        },
+        {
+            "source": "thought-core",
+            "request_id": "turn-too-far-attempt-1",
+            "deadline_monotonic_s": monotonic() + 181.0,
+        },
+    ],
+)
+def test_thought_core_invalid_execution_contract_fails_before_submit(
+    config,
+    token,
+    tmp_path,
+    payload,
+):
+    client, ha, _, _ = make_client(config, token, tmp_path)
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json=payload,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["error"] == "invalid_execution_contract"
+    assert response.json()["execution_lifecycle_class"] == "failed_before_submit"
+    assert response.json()["submission_count"] == 0
+    assert response.json()["execution_id"] is None
+    assert response.json()["request_id"] is None
+    assert ha.calls == []
+
+
+def test_expired_thought_core_request_is_terminal_and_never_retried(config, token, tmp_path):
+    client, ha, _, _ = make_client(config, token, tmp_path)
+    payload = {
+        "source": "thought-core",
+        "request_id": "turn-expired-attempt-1",
+        "deadline_monotonic_s": monotonic() - 0.01,
+    }
+    first = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+    second = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+
+    assert first.json()["status"] == "expired"
+    assert first.json()["execution_lifecycle_class"] == "expired_before_submit"
+    assert first.json()["submission_count"] == 0
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["execution_id"] == first.json()["execution_id"]
+    assert second.json()["execution_lifecycle_class"] == "expired_before_submit"
+    assert ha.calls == []
+
+
+def test_unknown_submission_outcome_is_terminal_and_blocks_duplicate_retry(config, token, tmp_path):
+    ha = FakeHomeAssistant(fail=True, submission_outcome="submission_outcome_unknown")
+    client, _, _, _ = make_client(config, token, tmp_path, ha=ha)
+    payload = {
+        "source": "thought-core",
+        "request_id": "turn-unknown-attempt-1",
+        "deadline_monotonic_s": monotonic() + 5.0,
+    }
+    first = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+    second = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+
+    assert first.json()["status"] == "outcome_unknown"
+    assert first.json()["execution_lifecycle_class"] == "submission_outcome_unknown"
+    assert first.json()["submission_count"] is None
+    assert first.json()["error"] == "home_assistant_submission_outcome_unknown"
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["execution_id"] == first.json()["execution_id"]
+    assert second.json()["submission_count"] is None
+    assert ha.calls == ["script.demo_light_on"]
+
+
+def test_unexpected_home_assistant_exception_becomes_terminal_outcome_unknown(
+    config,
+    token,
+    tmp_path,
+):
+    class UnexpectedHomeAssistant(FakeHomeAssistant):
+        async def turn_on_script(self, script_entity_id: str, *, timeout_seconds=None):
+            del timeout_seconds
+            self.calls.append(script_entity_id)
+            raise RuntimeError("private raw failure detail")
+
+    ha = UnexpectedHomeAssistant()
+    client, _, log_path, _ = make_client(config, token, tmp_path, ha=ha)
+    payload = {
+        "source": "thought-core",
+        "request_id": "turn-unexpected-attempt-1",
+        "deadline_monotonic_s": monotonic() + 5.0,
+    }
+    first = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+    second = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+
+    assert first.json()["status"] == "outcome_unknown"
+    assert first.json()["execution_lifecycle_class"] == "submission_outcome_unknown"
+    assert first.json()["submission_count"] is None
+    assert first.json()["terminal"] is True
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["execution_id"] == first.json()["execution_id"]
+    assert ha.calls == ["script.demo_light_on"]
+    serialized = json.dumps(first.json()) + log_path.read_text(encoding="utf-8")
+    assert "private raw failure detail" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_concurrent_duplicate_observes_in_flight_and_calls_home_assistant_once(
+    config,
+    token,
+    tmp_path,
+):
+    class BlockingHomeAssistant(FakeHomeAssistant):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def turn_on_script(self, script_entity_id: str, *, timeout_seconds=None):
+            del timeout_seconds
+            self.calls.append(script_entity_id)
+            self.started.set()
+            await self.release.wait()
+            return {"status_code": 200, "body": []}
+
+    ha = BlockingHomeAssistant()
+    app, _, _, _ = make_app(config, token, tmp_path, ha=ha)
+    payload = {
+        "source": "thought-core",
+        "request_id": "turn-concurrent-attempt-1",
+        "deadline_monotonic_s": monotonic() + 5.0,
+    }
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first_task = asyncio.create_task(
+            client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+        )
+        await asyncio.wait_for(ha.started.wait(), timeout=1.0)
+        duplicate = await client.post(
+            "/actions/light_on/execute",
+            headers=auth_headers(token),
+            json=payload,
+        )
+        assert duplicate.json()["status"] == "duplicate"
+        assert duplicate.json()["execution_lifecycle_class"] == "submission_in_flight"
+        assert duplicate.json()["submission_count"] is None
+        assert duplicate.json()["terminal"] is False
+        assert ha.calls == ["script.demo_light_on"]
+        ha.release.set()
+        first = await asyncio.wait_for(first_task, timeout=1.0)
+
+    assert first.json()["execution_lifecycle_class"] == "submission_completed"
+    assert first.json()["submission_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_in_flight_request_is_tracked_as_outcome_unknown(
+    config,
+    token,
+    tmp_path,
+):
+    class BlockingHomeAssistant(FakeHomeAssistant):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+
+        async def turn_on_script(self, script_entity_id: str, *, timeout_seconds=None):
+            del timeout_seconds
+            self.calls.append(script_entity_id)
+            self.started.set()
+            await asyncio.Event().wait()
+
+    ha = BlockingHomeAssistant()
+    app, _, _, _ = make_app(config, token, tmp_path, ha=ha)
+    request_id = "turn-cancel-attempt-1"
+    payload = {
+        "source": "thought-core",
+        "request_id": request_id,
+        "deadline_monotonic_s": monotonic() + 5.0,
+    }
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        task = asyncio.create_task(
+            client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+        )
+        await asyncio.wait_for(ha.started.wait(), timeout=1.0)
+        execution_id = next(iter(app.state.execution_requests.values()))["execution_id"]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        tracking = await client.get(
+            f"/executions/{execution_id}",
+            headers=auth_headers(token),
+            params={"action_id": "light_on", "request_id": request_id},
+        )
+
+    assert tracking.json()["execution_lifecycle_class"] == "submission_outcome_unknown"
+    assert tracking.json()["submission_count"] is None
+    assert tracking.json()["terminal"] is True
+    assert ha.calls == ["script.demo_light_on"]
+
+
+def test_execution_request_pruning_never_removes_in_flight_records(
+    config,
+    token,
+    tmp_path,
+    monkeypatch,
+):
+    app, _, _, _ = make_app(config, token, tmp_path)
+    app.state.execution_requests = {
+        "in-flight": {
+            "execution_id": "in-flight",
+            "terminal": False,
+            "expires_at": 0.0,
+        },
+        "terminal": {
+            "execution_id": "terminal",
+            "terminal": True,
+            "expires_at": 0.0,
+        },
+    }
+    monkeypatch.setattr(app_module, "monotonic", lambda: 10.0)
+
+    app_module._prune_execution_requests(app)
+
+    assert list(app.state.execution_requests) == ["in-flight"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exception_factory", "expected_outcome"),
+    [
+        (
+            lambda request: httpx.ConnectError("connect", request=request),
+            "failed_before_submit",
+        ),
+        (
+            lambda request: httpx.ReadTimeout("read", request=request),
+            "submission_outcome_unknown",
+        ),
+    ],
+)
+async def test_home_assistant_transport_failure_classification(
+    config,
+    monkeypatch,
+    exception_factory,
+    expected_outcome,
+):
+    class RaisingAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, *, headers, json):
+            del headers, json
+            raise exception_factory(httpx.Request("POST", url))
+
+    monkeypatch.setattr("home_control_bridge.home_assistant.httpx.AsyncClient", RaisingAsyncClient)
+    client = HomeAssistantClient(config.home_assistant, "test-token")
+    with pytest.raises(HomeAssistantError) as caught:
+        await client.turn_on_script("script.demo", timeout_seconds=0.5)
+    assert caught.value.submission_outcome == expected_outcome
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "expected_outcome"),
+    [
+        (400, "failed_before_submit"),
+        (408, "submission_outcome_unknown"),
+        (429, "submission_outcome_unknown"),
+        (500, "submission_outcome_unknown"),
+    ],
+)
+async def test_home_assistant_http_status_failure_classification(
+    config,
+    monkeypatch,
+    status_code,
+    expected_outcome,
+):
+    class StatusAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, *, headers, json):
+            del headers, json
+            return httpx.Response(status_code, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("home_control_bridge.home_assistant.httpx.AsyncClient", StatusAsyncClient)
+    client = HomeAssistantClient(config.home_assistant, "test-token")
+    with pytest.raises(HomeAssistantError) as caught:
+        await client.turn_on_script("script.demo", timeout_seconds=0.5)
+    assert caught.value.submission_outcome == expected_outcome
 
 
 def test_confirm_preview_issues_one_time_confirmation_token(config, token, tmp_path):

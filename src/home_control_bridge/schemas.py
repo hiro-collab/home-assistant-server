@@ -122,6 +122,11 @@ class ActionRequest(BaseModel):
     dry_run: bool = False
     confirmed: bool = False
     confirmation_token: str | None = Field(default=None, max_length=128)
+    deadline_monotonic_s: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+    )
 
 
 class ActionResponse(BaseModel):
@@ -135,6 +140,8 @@ class ActionResponse(BaseModel):
         "duplicate",
         "submitted",
         "failed",
+        "expired",
+        "outcome_unknown",
     ]
     confirmation_required: bool = False
     message: str
@@ -166,6 +173,35 @@ class ActionResponse(BaseModel):
     confirmation_token: str | None = None
     preview: dict[str, Any] | None = None
     error: str | None = None
+    execution_lifecycle_class: Literal[
+        "submission_in_flight",
+        "submission_completed",
+        "failed_before_submit",
+        "submission_outcome_unknown",
+        "expired_before_submit",
+    ] | None = None
+    submission_count: Literal[0, 1] | None = None
+    terminal: bool | None = None
+
+
+class ExecutionTrackingResponse(BaseModel):
+    ok: bool
+    found: bool
+    action_match: bool
+    request_match: bool
+    execution_lifecycle_class: Literal[
+        "submission_in_flight",
+        "submission_completed",
+        "failed_before_submit",
+        "submission_outcome_unknown",
+        "expired_before_submit",
+    ] | None = None
+    submission_count: Literal[0, 1] | None = None
+    terminal: bool | None = None
+    elapsed_ms: int | None = Field(default=None, ge=0)
+    proof_ceiling: Literal["bridge_submission_tracking_only"] = (
+        "bridge_submission_tracking_only"
+    )
 
 
 class HealthResponse(BaseModel):

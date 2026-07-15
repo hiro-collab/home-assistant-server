@@ -61,12 +61,30 @@ Home Control Safety Bridge は action 実行の入口と Home Assistant への�
 | `POST /actions/{action_id}/preview` | Home Assistant 呼び出しなし | 実行予定文言、確認要否、一時 confirmation token | live execute、dry-run、HA state match |
 | `POST /actions/{action_id}/execute` with `dry_run: true` | Home Assistant 呼び出しなし | execute payload の分岐と dry-run 応答 | live execute、confirmation token の再利用可否 |
 | `POST /actions/{action_id}/execute` | Home Assistant script 呼び出しあり | command submission と bridge response | HA-visible state match、物理家電動作 |
+| `GET /executions/{execution_id}` | なし | 同一 process 内の submission lifecycle / count の class-only CheckTracking | HA-visible state、物理家電動作、process restart をまたぐ exactly-once |
 | `GET /actions/{action_id}/state` | なし | HA-visible current state / expected state の読み取り一致 | command submission、物理家電動作 |
 
 `CheckTracking` 相当の追跡 ID、`CheckState` 相当の HA-visible state、一時
 confirmation token、物理家電状態は別々の層です。reviewed route が要求した層だけを
 結果として主張し、`command accepted` や `confirmed-submitted` を physical proof として
 扱わないでください。
+
+すべての本実行には Bridge 自身が bounded monotonic deadline を設定します。上流から
+より短い deadline が渡された場合はそれを採用し、request body の `source` 文字列を
+期限適用の信頼根拠にはしません。Thought Core は同じ turn deadline から導出した
+deadline と決定的な `request_id` を渡します。Bridge は `(action_id, request_id)`
+ごとに、`submission_in_flight`、`submission_completed`、
+`failed_before_submit`、`submission_outcome_unknown`、`expired_before_submit` を
+process lifetime 内だけ保持します。同じ key の再要求は Home Assistant へ再送せず、
+同じ execution lifecycle を返します。
+
+接続前の確定失敗は submission count 0、HTTP request が届いた可能性を除外できない
+timeout / disconnect / protocol failure は count unknown とします。後者を成功・失敗の
+どちらにも読み替えず、blind retry や自動 restore を行いません。2xx は submission
+count 1 の証拠に限られ、HA-visible state や物理結果の証拠ではありません。terminal
+record だけが TTL cleanup 対象で、in-flight record は期限だけで消しません。Bridge
+再起動をまたぐ exactly-once が必要な場合は、別途 local-private ledger の設計と承認が
+必要です。
 
 `restore_required: false` の light / fan などは command stimulus として扱えますが、
 これは「戻し操作不要」の source/static planning metadata であり、現在状態が読めたことや

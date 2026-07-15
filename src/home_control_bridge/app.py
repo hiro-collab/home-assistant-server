@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import secrets
 import os
+import re
 from hashlib import sha256
 from datetime import UTC, datetime
 from math import isfinite
@@ -36,7 +38,14 @@ from .config import (
 )
 from .faults import FaultContext, FaultDecision, evaluate_fault
 from .home_assistant import HomeAssistantClient, HomeAssistantEntityState, HomeAssistantError
-from .schemas import ActionRequest, ActionResponse, ActionStateResponse, ActionSummary, HealthResponse
+from .schemas import (
+    ActionRequest,
+    ActionResponse,
+    ActionStateResponse,
+    ActionSummary,
+    ExecutionTrackingResponse,
+    HealthResponse,
+)
 from .udp_events import UdpEventPhase, UdpEventSender
 
 CONFIRMATION_TOKEN_TTL_SECONDS = 120
@@ -44,6 +53,10 @@ EXECUTION_REQUEST_TTL_SECONDS = 600
 GENERIC_CONFIG_ERROR = "Bridge configuration is unavailable."
 HOME_ASSISTANT_ERROR_CODE = "home_assistant_request_failed"
 DRY_RUN_CONFLICT_ERROR_CODE = "dry_run_request_conflict"
+EXECUTION_CONTRACT_ERROR_CODE = "invalid_execution_contract"
+SUBMISSION_OUTCOME_UNKNOWN_ERROR_CODE = "home_assistant_submission_outcome_unknown"
+MAX_EXECUTION_DEADLINE_SECONDS = 180.0
+THOUGHT_CORE_REQUEST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}\Z")
 
 OPERATOR_CONSOLE_HTML = """<!doctype html>
 <html lang="en">
@@ -706,6 +719,17 @@ def create_app(
         if not body.dry_run and dry_run_record is not None:
             return _dry_run_conflict_response(app, action_id, action, body, preview)
 
+        duplicate_execution = _get_execution_request(app, action_id, body.request_id)
+        if not body.dry_run and duplicate_execution is not None:
+            return _duplicate_execution_response(
+                app,
+                action_id,
+                action,
+                body,
+                preview,
+                duplicate_execution,
+            )
+
         if action.confirm_required and not (
             body.confirmed and _consume_confirmation_token(app, action_id, body.confirmation_token)
         ):
@@ -768,38 +792,43 @@ def create_app(
                 **_response_tracking_fields(action),
             )
 
-        duplicate_execution = _get_execution_request(app, action_id, body.request_id)
-        if duplicate_execution is not None:
-            message = "同じ request_id の操作はすでに受け付け済みです。"
-            _audit(
+        contract_error = _execution_contract_error(body)
+        if contract_error is not None:
+            return _execution_contract_error_response(
                 app,
-                {
-                    "event": "execute_duplicate_request",
-                    "action_id": action_id,
-                    "execution_id": duplicate_execution["execution_id"],
-                    "issued_at": duplicate_execution["issued_at"],
-                    "status": "duplicate",
-                    **_request_audit_fields(body),
-                    "executed": False,
-                    "confirm_required": action.confirm_required,
-                    "confirmed": body.confirmed,
-                    "ha_script": action.ha_script,
-                    **_expected_effect_audit_fields(action),
-                },
+                action_id,
+                action,
+                body,
+                preview,
+                contract_error,
             )
-            return ActionResponse(
-                ok=True,
-                action_id=action_id,
-                executed=False,
-                status="duplicate",
-                confirmation_required=action.confirm_required,
-                message=message,
-                speak=message,
-                request_id=body.request_id,
-                execution_id=duplicate_execution["execution_id"],
-                issued_at=duplicate_execution["issued_at"],
-                preview=preview,
-                **_response_tracking_fields(action),
+
+        effective_deadline = _effective_execution_deadline(
+            body,
+            default_seconds=config.home_assistant.timeout_seconds,
+        )
+        deadline_remaining = effective_deadline - monotonic()
+        if deadline_remaining is not None and deadline_remaining <= 0:
+            execution_id = str(uuid4())
+            issued_at = _utc_now_iso()
+            _register_execution_request(
+                app,
+                action_id,
+                body.request_id,
+                execution_id,
+                issued_at,
+                lifecycle="expired_before_submit",
+                submission_count=0,
+                terminal=True,
+            )
+            return _expired_before_submit_response(
+                app,
+                action_id,
+                action,
+                body,
+                preview,
+                execution_id,
+                issued_at,
             )
 
         fault = _evaluate_fault(app, config, action_id, body)
@@ -812,17 +841,61 @@ def create_app(
         _emit_action_event(app, "start", action_id, action, body, execution_id=execution_id)
 
         try:
-            ha_result = await app.state.ha_client.turn_on_script(action.ha_script)
+            deadline_remaining = effective_deadline - monotonic()
+            if deadline_remaining is not None and deadline_remaining <= 0:
+                _complete_execution_request(
+                    app,
+                    action_id,
+                    body.request_id,
+                    lifecycle="expired_before_submit",
+                    submission_count=0,
+                )
+                return _expired_before_submit_response(
+                    app,
+                    action_id,
+                    action,
+                    body,
+                    preview,
+                    execution_id,
+                    issued_at,
+                )
+            ha_result = await app.state.ha_client.turn_on_script(
+                action.ha_script,
+                timeout_seconds=deadline_remaining,
+            )
+        except asyncio.CancelledError:
+            _complete_execution_request(
+                app,
+                action_id,
+                body.request_id,
+                lifecycle="submission_outcome_unknown",
+                submission_count=None,
+            )
+            raise
         except HomeAssistantError as exc:
             error_detail = getattr(exc, "log_detail", str(exc))
+            lifecycle = getattr(exc, "submission_outcome", "failed_before_submit")
+            if lifecycle not in {"failed_before_submit", "submission_outcome_unknown"}:
+                lifecycle = "submission_outcome_unknown"
+            submission_count = 0 if lifecycle == "failed_before_submit" else None
+            _complete_execution_request(
+                app,
+                action_id,
+                body.request_id,
+                lifecycle=lifecycle,
+                submission_count=submission_count,
+            )
+            outcome_unknown = lifecycle == "submission_outcome_unknown"
             _audit(
                 app,
                 {
-                    "event": "execute_failed",
+                    "event": (
+                        "execute_outcome_unknown" if outcome_unknown else "execute_failed_before_submit"
+                    ),
                     "action_id": action_id,
                     "execution_id": execution_id,
                     "issued_at": issued_at,
-                    "status": "failed",
+                    "status": lifecycle,
                     **_request_audit_fields(body),
                     "executed": False,
                     "confirm_required": action.confirm_required,
@@ -839,25 +912,104 @@ def create_app(
                 action,
                 body,
                 execution_id=execution_id,
-                message="Home Assistantへの実行要求に失敗しました。",
-                error=HOME_ASSISTANT_ERROR_CODE,
+                message=(
+                    "Home Assistantへの要求結果を確認できませんでした。"
+                    if outcome_unknown
+                    else "Home Assistantへの実行要求に失敗しました。"
+                ),
+                error=(
+                    SUBMISSION_OUTCOME_UNKNOWN_ERROR_CODE
+                    if outcome_unknown
+                    else HOME_ASSISTANT_ERROR_CODE
+                ),
             )
             return ActionResponse(
                 ok=False,
                 action_id=action_id,
                 executed=False,
-                status="failed",
+                status="outcome_unknown" if outcome_unknown else "failed",
                 confirmation_required=action.confirm_required,
-                message="Home Assistantへの実行要求に失敗しました。",
-                speak="家電操作に失敗しました。",
+                message=(
+                    "操作要求の結果を確認できません。再実行は保留します。"
+                    if outcome_unknown
+                    else "Home Assistantへの実行要求に失敗しました。"
+                ),
+                speak=(
+                    "操作結果を確認できないため、再実行を保留します。"
+                    if outcome_unknown
+                    else "家電操作に失敗しました。"
+                ),
                 request_id=body.request_id,
                 execution_id=execution_id,
                 issued_at=issued_at,
                 preview=preview,
                 **_response_tracking_fields(action),
-                error=HOME_ASSISTANT_ERROR_CODE,
+                error=(
+                    SUBMISSION_OUTCOME_UNKNOWN_ERROR_CODE
+                    if outcome_unknown
+                    else HOME_ASSISTANT_ERROR_CODE
+                ),
+                execution_lifecycle_class=lifecycle,
+                submission_count=submission_count,
+                terminal=True,
+            )
+        except Exception:
+            _complete_execution_request(
+                app,
+                action_id,
+                body.request_id,
+                lifecycle="submission_outcome_unknown",
+                submission_count=None,
+            )
+            _audit(
+                app,
+                {
+                    "event": "execute_outcome_unknown",
+                    "action_id": action_id,
+                    "execution_id": execution_id,
+                    "issued_at": issued_at,
+                    "status": "submission_outcome_unknown",
+                    "executed": False,
+                    "submission_count": None,
+                    "error": "unexpected_home_assistant_client_error",
+                },
+            )
+            _emit_action_event(
+                app,
+                "error",
+                action_id,
+                action,
+                body,
+                execution_id=execution_id,
+                message="Home Assistantへの要求結果を確認できませんでした。",
+                error=SUBMISSION_OUTCOME_UNKNOWN_ERROR_CODE,
+            )
+            return ActionResponse(
+                ok=False,
+                action_id=action_id,
+                executed=False,
+                status="outcome_unknown",
+                confirmation_required=action.confirm_required,
+                message="操作要求の結果を確認できません。再実行は保留します。",
+                speak="操作結果を確認できないため、再実行を保留します。",
+                request_id=body.request_id,
+                execution_id=execution_id,
+                issued_at=issued_at,
+                preview=preview,
+                **_response_tracking_fields(action),
+                error=SUBMISSION_OUTCOME_UNKNOWN_ERROR_CODE,
+                execution_lifecycle_class="submission_outcome_unknown",
+                submission_count=None,
+                terminal=True,
             )
 
+        _complete_execution_request(
+            app,
+            action_id,
+            body.request_id,
+            lifecycle="submission_completed",
+            submission_count=1,
+        )
         _audit(
             app,
             {
@@ -889,6 +1041,48 @@ def create_app(
             issued_at=issued_at,
             preview=preview,
             **_response_tracking_fields(action),
+            execution_lifecycle_class="submission_completed",
+            submission_count=1,
+            terminal=True,
+        )
+
+    @app.get(
+        "/executions/{execution_id}",
+        response_model=ExecutionTrackingResponse,
+        dependencies=[Depends(require_auth)],
+    )
+    async def track_execution(
+        execution_id: str,
+        action_id: str,
+        request_id: str,
+    ) -> ExecutionTrackingResponse:
+        record = _find_execution_request(app, execution_id)
+        if record is None:
+            return ExecutionTrackingResponse(
+                ok=False,
+                found=False,
+                action_match=False,
+                request_match=False,
+            )
+        action_match = record["action_id"] == action_id
+        request_match = record["request_id"] == request_id
+        if not action_match or not request_match:
+            return ExecutionTrackingResponse(
+                ok=False,
+                found=True,
+                action_match=action_match,
+                request_match=request_match,
+            )
+        elapsed_ms = max(0, int((monotonic() - record["started_monotonic"]) * 1000))
+        return ExecutionTrackingResponse(
+            ok=True,
+            found=True,
+            action_match=True,
+            request_match=True,
+            execution_lifecycle_class=record["lifecycle"],
+            submission_count=record["submission_count"],
+            terminal=record["terminal"],
+            elapsed_ms=elapsed_ms,
         )
 
     return app
@@ -930,21 +1124,190 @@ def _prune_confirmation_tokens(app: FastAPI) -> None:
             app.state.confirmation_tokens.pop(token, None)
 
 
+def _execution_contract_error(body: ActionRequest) -> str | None:
+    if body.request_id is not None and THOUGHT_CORE_REQUEST_ID_RE.fullmatch(body.request_id) is None:
+        return "request_id_invalid"
+    if (
+        body.deadline_monotonic_s is not None
+        and body.deadline_monotonic_s - monotonic() > MAX_EXECUTION_DEADLINE_SECONDS
+    ):
+        return "deadline_out_of_range"
+    return None
+
+
+def _effective_execution_deadline(
+    body: ActionRequest,
+    *,
+    default_seconds: float,
+) -> float:
+    bridge_deadline = monotonic() + min(
+        max(float(default_seconds), 0.001),
+        MAX_EXECUTION_DEADLINE_SECONDS,
+    )
+    if body.deadline_monotonic_s is None:
+        return bridge_deadline
+    return min(body.deadline_monotonic_s, bridge_deadline)
+
+
+def _execution_contract_error_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig,
+    body: ActionRequest,
+    preview: dict[str, object],
+    contract_error: str,
+) -> ActionResponse:
+    _audit(
+        app,
+        {
+            "event": "execute_contract_rejected",
+            "action_id": action_id,
+            "status": "failed_before_submit",
+            "contract_error": contract_error,
+            "executed": False,
+            "submission_count": 0,
+        },
+    )
+    message = "実行要求の期限または識別情報が不正なため、家電には送信していません。"
+    return ActionResponse(
+        ok=False,
+        action_id=action_id,
+        executed=False,
+        status="failed",
+        confirmation_required=action.confirm_required,
+        message=message,
+        speak=message,
+        preview=preview,
+        **_response_tracking_fields(action),
+        error=EXECUTION_CONTRACT_ERROR_CODE,
+        execution_lifecycle_class="failed_before_submit",
+        submission_count=0,
+        terminal=True,
+    )
+
+
+def _expired_before_submit_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig,
+    body: ActionRequest,
+    preview: dict[str, object],
+    execution_id: str,
+    issued_at: str,
+) -> ActionResponse:
+    _audit(
+        app,
+        {
+            "event": "execute_expired_before_submit",
+            "action_id": action_id,
+            "execution_id": execution_id,
+            "issued_at": issued_at,
+            "status": "expired_before_submit",
+            "executed": False,
+            "submission_count": 0,
+        },
+    )
+    message = "実行期限を過ぎたため、家電には送信していません。"
+    return ActionResponse(
+        ok=False,
+        action_id=action_id,
+        executed=False,
+        status="expired",
+        confirmation_required=action.confirm_required,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        execution_id=execution_id,
+        issued_at=issued_at,
+        preview=preview,
+        **_response_tracking_fields(action),
+        error="expired_before_submit",
+        execution_lifecycle_class="expired_before_submit",
+        submission_count=0,
+        terminal=True,
+    )
+
+
+def _duplicate_execution_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig,
+    body: ActionRequest,
+    preview: dict[str, object],
+    record: dict[str, object],
+) -> ActionResponse:
+    lifecycle = str(record["lifecycle"])
+    submission_count = record["submission_count"]
+    terminal = bool(record["terminal"])
+    safe_messages = {
+        "submission_in_flight": "同じ操作要求は処理中です。二重送信はしていません。",
+        "submission_completed": "同じ操作要求は送信済みです。二重送信はしていません。",
+        "failed_before_submit": "同じ操作要求は送信前に終了しています。二重送信はしていません。",
+        "submission_outcome_unknown": "同じ操作要求の結果を確認できないため、再送信を保留します。",
+        "expired_before_submit": "同じ操作要求は期限切れで、家電には送信していません。",
+    }
+    message = safe_messages.get(lifecycle, "同じ操作要求はすでに受け付け済みです。")
+    _audit(
+        app,
+        {
+            "event": "execute_duplicate_request",
+            "action_id": action_id,
+            "execution_id": record["execution_id"],
+            "issued_at": record["issued_at"],
+            "status": "duplicate",
+            "execution_lifecycle_class": lifecycle,
+            "submission_count": submission_count,
+            "executed": False,
+        },
+    )
+    return ActionResponse(
+        ok=lifecycle in {"submission_in_flight", "submission_completed"},
+        action_id=action_id,
+        executed=False,
+        status="duplicate",
+        confirmation_required=action.confirm_required,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        execution_id=str(record["execution_id"]),
+        issued_at=str(record["issued_at"]),
+        preview=preview,
+        **_response_tracking_fields(action),
+        error=(
+            SUBMISSION_OUTCOME_UNKNOWN_ERROR_CODE
+            if lifecycle == "submission_outcome_unknown"
+            else None
+        ),
+        execution_lifecycle_class=lifecycle,
+        submission_count=submission_count,
+        terminal=terminal,
+    )
+
+
 def _execution_key(action_id: str, request_id: str) -> str:
     return f"{action_id}\0{request_id}"
 
 
-def _get_execution_request(app: FastAPI, action_id: str, request_id: str | None) -> dict[str, str] | None:
+def _get_execution_request(
+    app: FastAPI,
+    action_id: str,
+    request_id: str | None,
+) -> dict[str, object] | None:
     _prune_execution_requests(app)
     if not request_id:
         return None
     record = app.state.execution_requests.get(_execution_key(action_id, request_id))
     if record is None:
         return None
-    return {
-        "execution_id": record["execution_id"],
-        "issued_at": record["issued_at"],
-    }
+    return record
+
+
+def _find_execution_request(app: FastAPI, execution_id: str) -> dict[str, object] | None:
+    _prune_execution_requests(app)
+    for record in app.state.execution_requests.values():
+        if record["execution_id"] == execution_id:
+            return record
+    return None
 
 
 def _register_execution_request(
@@ -953,22 +1316,57 @@ def _register_execution_request(
     request_id: str | None,
     execution_id: str,
     issued_at: str,
+    *,
+    lifecycle: str = "submission_in_flight",
+    submission_count: int | None = None,
+    terminal: bool = False,
 ) -> None:
     _prune_execution_requests(app)
     if not request_id:
         return
     app.state.execution_requests[_execution_key(action_id, request_id)] = {
-        "expires_at": monotonic() + EXECUTION_REQUEST_TTL_SECONDS,
+        "action_id": action_id,
+        "request_id": request_id,
         "execution_id": execution_id,
         "issued_at": issued_at,
+        "started_monotonic": monotonic(),
+        "lifecycle": lifecycle,
+        "submission_count": submission_count,
+        "terminal": terminal,
+        "expires_at": (
+            monotonic() + EXECUTION_REQUEST_TTL_SECONDS if terminal else None
+        ),
     }
+
+
+def _complete_execution_request(
+    app: FastAPI,
+    action_id: str,
+    request_id: str | None,
+    *,
+    lifecycle: str,
+    submission_count: int | None,
+) -> None:
+    if not request_id:
+        return
+    record = app.state.execution_requests.get(_execution_key(action_id, request_id))
+    if record is None:
+        return
+    record.update(
+        {
+            "lifecycle": lifecycle,
+            "submission_count": submission_count,
+            "terminal": True,
+            "expires_at": monotonic() + EXECUTION_REQUEST_TTL_SECONDS,
+        }
+    )
 
 
 def _prune_execution_requests(app: FastAPI) -> None:
     now = monotonic()
     for key, record in list(app.state.execution_requests.items()):
-        expires_at = record["expires_at"]
-        if expires_at < now:
+        expires_at = record.get("expires_at")
+        if record.get("terminal") is True and isinstance(expires_at, (int, float)) and expires_at < now:
             app.state.execution_requests.pop(key, None)
 
 
@@ -1236,7 +1634,16 @@ def _fault_success_response(
 ) -> ActionResponse:
     execution_id = str(uuid4())
     issued_at = _utc_now_iso()
-    _register_execution_request(app, action_id, body.request_id, execution_id, issued_at)
+    _register_execution_request(
+        app,
+        action_id,
+        body.request_id,
+        execution_id,
+        issued_at,
+        lifecycle="submission_completed",
+        submission_count=1,
+        terminal=True,
+    )
     message = fault.message or (action.response_text if action is not None else "Simulated action submitted.")
     _audit_fault(
         app,
@@ -1262,6 +1669,9 @@ def _fault_success_response(
         issued_at=issued_at,
         preview=preview,
         **_optional_response_tracking_fields(action),
+        execution_lifecycle_class="submission_completed",
+        submission_count=1,
+        terminal=True,
     )
 
 
@@ -1275,7 +1685,16 @@ def _fault_failed_response(
 ) -> ActionResponse:
     execution_id = str(uuid4())
     issued_at = _utc_now_iso()
-    _register_execution_request(app, action_id, body.request_id, execution_id, issued_at)
+    _register_execution_request(
+        app,
+        action_id,
+        body.request_id,
+        execution_id,
+        issued_at,
+        lifecycle="failed_before_submit",
+        submission_count=0,
+        terminal=True,
+    )
     message = fault.message or "Home Assistantへの実行要求に失敗しました。"
     _audit_fault(
         app,
@@ -1302,6 +1721,9 @@ def _fault_failed_response(
         preview=preview,
         **_optional_response_tracking_fields(action),
         error=HOME_ASSISTANT_ERROR_CODE,
+        execution_lifecycle_class="failed_before_submit",
+        submission_count=0,
+        terminal=True,
     )
 
 
