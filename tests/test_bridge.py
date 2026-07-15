@@ -1,15 +1,32 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from pathlib import Path
+from time import monotonic
 from uuid import UUID
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+import home_control_bridge.app as app_module
 from home_control_bridge.app import create_app
 from home_control_bridge.audit import JsonlAuditLogger
-from home_control_bridge.config import BridgeConfig, ConfigError, get_required_secret
+from home_control_bridge.config import (
+    BridgeConfig,
+    ConfigError,
+    action_preview_payload,
+    get_required_secret,
+    load_config,
+)
+from home_control_bridge.faults import FaultContext, MAX_FAULT_ATTEMPT_STATE, evaluate_fault
+from home_control_bridge.home_assistant import (
+    HomeAssistantClient,
+    HomeAssistantEntityState,
+    HomeAssistantError,
+)
 
 
 class FakeUdpEventSender:
@@ -25,20 +42,49 @@ class FakeUdpEventSender:
 
 
 class FakeHomeAssistant:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        fail_state: bool = False,
+        states: dict[str, object] | None = None,
+        submission_outcome: str = "failed_before_submit",
+    ) -> None:
         self.calls: list[str] = []
+        self.timeouts: list[float | None] = []
+        self.state_calls: list[str] = []
         self.fail = fail
+        self.fail_state = fail_state
+        self.submission_outcome = submission_outcome
+        self.states = states or {"light.demo_room": "on"}
 
     async def check_connection(self):
         return {"ok": True, "status_code": 200}
 
-    async def turn_on_script(self, script_entity_id: str):
+    async def turn_on_script(self, script_entity_id: str, *, timeout_seconds=None):
         self.calls.append(script_entity_id)
+        self.timeouts.append(timeout_seconds)
         if self.fail:
+            raise HomeAssistantError("boom", submission_outcome=self.submission_outcome)
+        return {"status_code": 200, "body": [{"entity_id": script_entity_id}]}
+
+    async def get_entity_state(self, entity_id: str):
+        return (await self.get_entity_state_snapshot(entity_id)).state
+
+    async def get_entity_state_snapshot(self, entity_id: str):
+        self.state_calls.append(entity_id)
+        if self.fail_state:
             from home_control_bridge.home_assistant import HomeAssistantError
 
-            raise HomeAssistantError("boom")
-        return {"status_code": 200, "body": [{"entity_id": script_entity_id}]}
+            raise HomeAssistantError("state unavailable")
+        value = self.states.get(entity_id, "unknown")
+        if isinstance(value, dict):
+            state = value.get("state", "unknown")
+            attributes = value.get("attributes", {})
+        else:
+            state = value
+            attributes = {}
+        return HomeAssistantEntityState(state=str(state), attributes=attributes if isinstance(attributes, dict) else {})
 
 
 @pytest.fixture
@@ -59,6 +105,9 @@ def config(tmp_path):
                     "ha_script": "script.demo_light_on",
                     "confirm_required": False,
                     "response_text": "照明をつけました。",
+                    "control_type": "stateful_target",
+                    "state_authority": "ha_entity",
+                    "verification": {"mode": "ha_state"},
                     "expected_effect": {
                         "domain": "light",
                         "service": "turn_on",
@@ -71,6 +120,9 @@ def config(tmp_path):
                     "ha_script": "script.curtain_close",
                     "confirm_required": True,
                     "response_text": "カーテンを閉めました。",
+                    "control_type": "position_command",
+                    "state_authority": "submitted_only",
+                    "verification": {"mode": "command_ack_only"},
                 },
             },
         }
@@ -81,15 +133,27 @@ def config(tmp_path):
 def token(monkeypatch):
     value = "local-test-token-with-at-least-32-characters"
     monkeypatch.setenv("HOME_CONTROL_API_TOKEN", value)
+    monkeypatch.delenv("HOME_CONTROL_FAULT_MODE", raising=False)
     return value
 
 
-def make_client(config, token, tmp_path, ha=None, udp=None):
+@pytest.fixture
+def fault_mode(monkeypatch, token):
+    del token
+    monkeypatch.setenv("HOME_CONTROL_FAULT_MODE", "1")
+
+
+def make_app(config, token, tmp_path, ha=None, udp=None):
     del token
     ha = ha or FakeHomeAssistant()
     logger = JsonlAuditLogger(str(tmp_path / "events.jsonl"))
     app = create_app(config=config, ha_client=ha, audit_logger=logger, udp_event_sender=udp)
-    return TestClient(app), ha, tmp_path / "events.jsonl", udp
+    return app, ha, tmp_path / "events.jsonl", udp
+
+
+def make_client(config, token, tmp_path, ha=None, udp=None):
+    app, ha, log_path, udp = make_app(config, token, tmp_path, ha=ha, udp=udp)
+    return TestClient(app), ha, log_path, udp
 
 
 def auth_headers(token: str) -> dict[str, str]:
@@ -100,6 +164,168 @@ def assert_uuid(value: str) -> None:
     assert str(UUID(value)) == value
 
 
+NO_POSITION_STATE_FIELDS = {
+    "position_attribute": None,
+    "expected_position_min": None,
+    "expected_position_max": None,
+    "actual_position": None,
+    "position_status": None,
+}
+
+
+def config_with_faults(config, rules, *, enabled: bool = True):
+    raw = config.model_dump(mode="json")
+    raw["faults"] = {
+        "enabled": enabled,
+        "rules": rules,
+    }
+    return BridgeConfig.model_validate(raw)
+
+
+def read_logs(log_path):
+    return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_example_config_loads_with_standard_appliance_actions_and_demo_climate_candidates():
+    config_path = Path(__file__).resolve().parents[1] / "config" / "home-control.example.yaml"
+
+    loaded = load_config(config_path)
+
+    standard_actions = {
+        "light_toggle",
+        "fan_on",
+        "fan_off",
+        "aircon_on",
+        "aircon_off",
+        "door_open",
+        "door_close",
+        "door_stop",
+        "vacuum_start",
+        "vacuum_return",
+        "vacuum_pause",
+    }
+    assert standard_actions.issubset(loaded.actions)
+
+    assert loaded.actions["light_toggle"].control_type == "stateless_toggle"
+    assert loaded.actions["light_toggle"].state_authority == "open_loop"
+    assert loaded.actions["light_toggle"].verification is not None
+    assert loaded.actions["light_toggle"].verification.mode == "external_observation"
+    assert loaded.actions["light_toggle"].expected_effect is None
+    assert loaded.actions["light_toggle"].live_test_candidate is True
+    assert loaded.actions["light_toggle"].restore_required is False
+
+    for action_id in ("fan_on", "fan_off", "aircon_on", "aircon_off"):
+        action = loaded.actions[action_id]
+        assert action.control_type == "stateless_command"
+        assert action.state_authority == "submitted_only"
+        assert action.verification is not None
+        assert action.verification.mode == "command_ack_only"
+        assert action.expected_effect is None
+
+    for action_id in ("light_toggle", "fan_on", "fan_off"):
+        payload = action_preview_payload(action_id, loaded.actions[action_id])
+        assert payload["live_test_readiness"] == "test_now"
+        assert payload["restore_required"] is False
+        assert payload["live_test_blockers"] == []
+
+    for action_id in ("door_open", "door_close"):
+        action = loaded.actions[action_id]
+        assert action.control_type == "position_command"
+        assert action.state_authority == "ha_entity"
+        assert action.verification is not None
+        assert action.verification.mode == "ha_state"
+        assert action.verification.position is not None
+        assert action.expected_effect is not None
+        assert action.expected_effect.domain == "cover"
+
+        payload = action_preview_payload(action_id, action)
+        assert payload["proof_ceiling"] == "ha_visible_cover_position_checkstate_layer"
+        assert payload["live_test_candidate"] is True
+        assert payload["live_test_readiness"] == "test_now"
+        assert payload["live_test_blockers"] == []
+
+    assert loaded.actions["door_open"].restore_action_id == "door_close"
+    assert loaded.actions["door_close"].terminal_action is True
+
+    door_stop = loaded.actions["door_stop"]
+    assert door_stop.control_type == "position_command"
+    assert door_stop.state_authority == "submitted_only"
+    assert door_stop.verification is not None
+    assert door_stop.verification.mode == "command_ack_only"
+    assert door_stop.expected_effect is None
+
+    for action_id in ("vacuum_start", "vacuum_pause"):
+        action = loaded.actions[action_id]
+        assert action.control_type == "job_command"
+        assert action.state_authority == "ha_entity"
+        assert action.verification is not None
+        assert action.verification.mode == "ha_state"
+        assert action.expected_effect is not None
+        assert action.expected_effect.domain == "vacuum"
+        assert action.restore_action_id == "vacuum_return"
+
+        payload = action_preview_payload(action_id, action)
+        assert payload["proof_ceiling"] == "ha_visible_vacuum_state_checkstate_layer"
+        assert payload["live_test_candidate"] is True
+        assert payload["live_test_readiness"] == "test_now"
+        assert payload["live_test_blockers"] == []
+
+    assert loaded.actions["vacuum_return"].control_type == "job_command"
+    assert loaded.actions["vacuum_return"].state_authority == "ha_entity"
+    assert loaded.actions["vacuum_return"].live_test_candidate is True
+    assert loaded.actions["vacuum_return"].terminal_action is True
+    assert loaded.actions["vacuum_return"].verification is not None
+    assert loaded.actions["vacuum_return"].verification.mode == "ha_state"
+    assert loaded.actions["vacuum_return"].expected_effect is not None
+    assert loaded.actions["vacuum_return"].expected_effect.expected_state == "docked"
+    vacuum_return_payload = action_preview_payload("vacuum_return", loaded.actions["vacuum_return"])
+    assert vacuum_return_payload["live_test_readiness"] == "test_now"
+    assert vacuum_return_payload["live_test_blockers"] == []
+
+    assert loaded.actions["aircon_cool"].control_type == "mode_command"
+    assert loaded.actions["aircon_cool"].live_test_candidate is True
+    assert loaded.actions["aircon_cool"].restore_action_id == "aircon_hvac_off"
+    assert loaded.actions["aircon_cool"].verification is not None
+    assert loaded.actions["aircon_cool"].verification.mode == "ha_state"
+    assert loaded.actions["aircon_cool"].expected_effect is not None
+    assert loaded.actions["aircon_cool"].expected_effect.domain == "climate"
+    assert loaded.actions["aircon_cool"].expected_effect.service == "set_hvac_mode"
+    assert action_preview_payload("aircon_cool", loaded.actions["aircon_cool"])["live_test_readiness"] == "test_now"
+    assert loaded.actions["aircon_hvac_off"].live_test_candidate is True
+    assert loaded.actions["aircon_hvac_off"].terminal_action is True
+    assert loaded.actions["aircon_hvac_off"].expected_effect is not None
+    assert loaded.actions["aircon_hvac_off"].expected_effect.expected_state == "off"
+
+    projection_payload = action_preview_payload("projection_mode", loaded.actions["projection_mode"])
+    assert projection_payload["proof_ceiling"] == "not_home_control_appliance_coverage_row"
+    assert projection_payload["live_test_candidate"] is False
+    assert projection_payload["live_test_readiness"] == "not_live_test_candidate"
+
+
+def test_example_config_live_readiness_classes_are_source_reproducible():
+    config_path = Path(__file__).resolve().parents[1] / "config" / "home-control.example.yaml"
+
+    loaded = load_config(config_path)
+
+    door_open_payload = action_preview_payload("door_open", loaded.actions["door_open"])
+    assert door_open_payload["proof_ceiling"] == "ha_visible_cover_position_checkstate_layer"
+    assert door_open_payload["live_test_readiness"] == "test_now"
+    assert door_open_payload["restore_action_id"] == "door_close"
+
+    vacuum_start_payload = action_preview_payload("vacuum_start", loaded.actions["vacuum_start"])
+    assert vacuum_start_payload["proof_ceiling"] == "ha_visible_vacuum_state_checkstate_layer"
+    assert vacuum_start_payload["live_test_readiness"] == "test_now"
+    assert vacuum_start_payload["restore_action_id"] == "vacuum_return"
+
+    vacuum_return_payload = action_preview_payload("vacuum_return", loaded.actions["vacuum_return"])
+    assert vacuum_return_payload["proof_ceiling"] == "ha_visible_vacuum_return_checkstate_layer"
+    assert vacuum_return_payload["live_test_readiness"] == "test_now"
+
+    projection_payload = action_preview_payload("projection_mode", loaded.actions["projection_mode"])
+    assert projection_payload["proof_ceiling"] == "not_home_control_appliance_coverage_row"
+    assert projection_payload["live_test_readiness"] == "not_live_test_candidate"
+
+
 def test_health_is_available_without_bridge_token(config, token, tmp_path):
     client, _, _, _ = make_client(config, token, tmp_path)
 
@@ -108,6 +334,63 @@ def test_health_is_available_without_bridge_token(config, token, tmp_path):
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert response.json()["actions_count"] == 2
+    assert response.json()["config_profile"] == "custom"
+    assert response.json()["demo_mappings_present"] is True
+    assert response.json()["light_demo_mappings_present"] is False
+    assert response.json()["fault_mode"] is False
+    assert response.json()["fault_rules_count"] == 0
+
+
+def test_health_exposes_redacted_config_profile_without_paths(config, token, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME_CONTROL_CONFIG", str(tmp_path / "local" / "env" / "home-control.live.yaml"))
+    client, _, _, _ = make_client(config, token, tmp_path)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    serialized = json.dumps(body)
+    assert body["config_profile"] == "local"
+    assert body["light_demo_mappings_present"] is False
+    assert "home-control.live.yaml" not in serialized
+    assert "light.demo_room" not in serialized
+    assert "HOME_ASSISTANT_TOKEN" not in serialized
+
+
+def test_operator_console_is_local_ui_without_embedded_secrets(config, token, tmp_path):
+    client, _, _, _ = make_client(config, token, tmp_path)
+
+    response = client.get("/operator")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    body = response.text
+    assert "Home Control Operator" in body
+    assert "/actions" in body
+    assert "/preview" in body
+    assert "/execute" in body
+    assert "Bridge API token" in body
+    assert 'id="route-actions"' in body
+    for action_id in (
+        "aircon_cool",
+        "aircon_hvac_off",
+        "light_toggle",
+        "fan_on",
+        "fan_off",
+        "door_open",
+        "door_close",
+        "vacuum_return",
+    ):
+        assert action_id in body
+    assert "reviewed_light_toggle_command_stimulus_candidate" in body
+    assert "reviewed_vacuum_return_restore_candidate" in body
+    assert "command_stimulus_without_restore_required" in body
+    assert "position_command_open_then_close" in body
+    assert "terminal_return_command_candidate" in body
+    assert "operator_shortcut_submission_summary_only" in body
+    assert token not in body
+    assert "HOME_CONTROL_API_TOKEN" not in body
+    assert "local-test-token" not in body
 
 
 def test_actions_require_api_token(config, token, tmp_path):
@@ -127,6 +410,376 @@ def test_actions_returns_public_allowlist(config, token, tmp_path):
     actions = response.json()
     assert {action["action_id"] for action in actions} == {"light_on", "curtain_close"}
     assert all("ha_script" not in action for action in actions)
+    by_id = {action["action_id"]: action for action in actions}
+    assert by_id["light_on"]["control_type"] == "stateful_target"
+    assert by_id["light_on"]["state_authority"] == "ha_entity"
+    assert by_id["light_on"]["verification_mode"] == "ha_state"
+    assert by_id["light_on"]["state_tracking"] == "tracked"
+    assert by_id["light_on"]["proof_ceiling"] == "ha_visible_state_checkstate_layer"
+    assert by_id["light_on"]["live_test_candidate"] is False
+    assert by_id["light_on"]["live_test_readiness"] == "not_live_test_candidate"
+    assert by_id["light_on"]["live_test_blockers"] == []
+    assert by_id["curtain_close"]["control_type"] == "position_command"
+    assert by_id["curtain_close"]["state_authority"] == "submitted_only"
+    assert by_id["curtain_close"]["verification_mode"] == "command_ack_only"
+    assert by_id["curtain_close"]["state_tracking"] == "ack_only"
+    assert by_id["curtain_close"]["proof_ceiling"] == "command_ack_only"
+    assert by_id["curtain_close"]["live_test_readiness"] == "not_live_test_candidate"
+    assert by_id["curtain_close"]["live_test_blockers"] == []
+
+
+def test_action_state_requires_api_token(config, token, tmp_path):
+    client, _, _, _ = make_client(config, token, tmp_path)
+
+    response = client.get("/actions/light_on/state")
+
+    assert response.status_code == 401
+
+
+def test_action_state_returns_redacted_match(config, token, tmp_path):
+    client, ha, _, _ = make_client(config, token, tmp_path)
+
+    response = client.get("/actions/light_on/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "ok": True,
+        "action_id": "light_on",
+        "status": "matched",
+        "control_type": "stateful_target",
+        "state_authority": "ha_entity",
+        "verification_mode": "ha_state",
+        "state_tracking": "tracked",
+        "expected_state": "on",
+        "expected_states": ["on"],
+        "actual_state": "on",
+        **NO_POSITION_STATE_FIELDS,
+    }
+    assert "entity_id" not in body
+    assert ha.state_calls == ["light.demo_room"]
+
+
+def test_action_state_reports_mismatch_without_entity(config, token, tmp_path):
+    ha = FakeHomeAssistant(states={"light.demo_room": "off"})
+    client, _, _, _ = make_client(config, token, tmp_path, ha=ha)
+
+    response = client.get("/actions/light_on/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["status"] == "mismatch"
+    assert body["expected_state"] == "on"
+    assert body["expected_states"] == ["on"]
+    assert body["actual_state"] == "off"
+    assert "entity_id" not in body
+
+
+def test_action_state_matches_accepted_states(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"]["verification"] = {
+        "mode": "ha_state",
+        "accepted_states": ["opening", "on"],
+        "settle_seconds": 2,
+        "timeout_seconds": 30,
+    }
+    accepted_config = BridgeConfig.model_validate(raw)
+    ha = FakeHomeAssistant(states={"light.demo_room": "opening"})
+    client, _, _, _ = make_client(accepted_config, token, tmp_path, ha=ha)
+
+    response = client.get("/actions/light_on/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["status"] == "matched"
+    assert body["expected_state"] == "on"
+    assert body["expected_states"] == ["on", "opening"]
+    assert body["actual_state"] == "opening"
+
+    actions_response = client.get("/actions", headers=auth_headers(token))
+    action = next(action for action in actions_response.json() if action["action_id"] == "light_on")
+    assert action["expected_states"] == ["on", "opening"]
+    assert action["settle_seconds"] == 2
+    assert action["timeout_seconds"] == 30
+
+
+def test_cover_action_state_requires_position_threshold(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["curtain_close"]["state_authority"] = "ha_entity"
+    raw["actions"]["curtain_close"]["verification"] = {
+        "mode": "ha_state",
+        "accepted_states": ["closed"],
+        "settle_seconds": 8,
+        "timeout_seconds": 60,
+        "position": {"attribute": "current_position", "max": 5},
+    }
+    raw["actions"]["curtain_close"]["expected_effect"] = {
+        "domain": "cover",
+        "service": "close_cover",
+        "entity_id": "cover.demo_curtain",
+        "expected_state": "closed",
+    }
+    cover_config = BridgeConfig.model_validate(raw)
+    ha = FakeHomeAssistant(
+        states={"cover.demo_curtain": {"state": "closed", "attributes": {"current_position": "2"}}}
+    )
+    client, _, _, _ = make_client(cover_config, token, tmp_path, ha=ha)
+
+    actions_response = client.get("/actions", headers=auth_headers(token))
+    action = next(action for action in actions_response.json() if action["action_id"] == "curtain_close")
+    assert action["state_tracking"] == "tracked"
+    assert action["position_proof"] == {"attribute": "current_position", "min": None, "max": 5.0}
+
+    response = client.get("/actions/curtain_close/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["status"] == "matched"
+    assert body["expected_state"] == "closed"
+    assert body["expected_states"] == ["closed"]
+    assert body["actual_state"] == "closed"
+    assert body["position_attribute"] == "current_position"
+    assert body["expected_position_min"] is None
+    assert body["expected_position_max"] == 5.0
+    assert body["actual_position"] == 2.0
+    assert body["position_status"] == "matched"
+    assert "entity_id" not in body
+
+
+def test_cover_action_state_rejects_state_match_when_position_is_outside_threshold(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["curtain_close"]["state_authority"] = "ha_entity"
+    raw["actions"]["curtain_close"]["verification"] = {
+        "mode": "ha_state",
+        "accepted_states": ["closed"],
+        "position": {"attribute": "current_position", "max": 5},
+    }
+    raw["actions"]["curtain_close"]["expected_effect"] = {
+        "domain": "cover",
+        "service": "close_cover",
+        "entity_id": "cover.demo_curtain",
+        "expected_state": "closed",
+    }
+    cover_config = BridgeConfig.model_validate(raw)
+    ha = FakeHomeAssistant(states={"cover.demo_curtain": {"state": "closed", "attributes": {"current_position": 42}}})
+    client, _, _, _ = make_client(cover_config, token, tmp_path, ha=ha)
+
+    response = client.get("/actions/curtain_close/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["status"] == "mismatch"
+    assert body["actual_state"] == "closed"
+    assert body["actual_position"] == 42.0
+    assert body["position_status"] == "mismatch"
+
+
+def test_cover_action_state_reports_missing_position_attribute_as_unavailable(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["curtain_close"]["state_authority"] = "ha_entity"
+    raw["actions"]["curtain_close"]["verification"] = {
+        "mode": "ha_state",
+        "accepted_states": ["closed"],
+        "position": {"attribute": "current_position", "max": 5},
+    }
+    raw["actions"]["curtain_close"]["expected_effect"] = {
+        "domain": "cover",
+        "service": "close_cover",
+        "entity_id": "cover.demo_curtain",
+        "expected_state": "closed",
+    }
+    cover_config = BridgeConfig.model_validate(raw)
+    ha = FakeHomeAssistant(states={"cover.demo_curtain": {"state": "closed", "attributes": {}}})
+    client, _, _, _ = make_client(cover_config, token, tmp_path, ha=ha)
+
+    response = client.get("/actions/curtain_close/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["status"] == "position_unavailable"
+    assert body["actual_state"] == "closed"
+    assert body["actual_position"] is None
+    assert body["position_status"] == "unavailable"
+
+
+def test_action_state_ack_only_action_does_not_call_home_assistant(config, token, tmp_path):
+    client, ha, _, _ = make_client(config, token, tmp_path)
+
+    response = client.get("/actions/curtain_close/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": False,
+        "action_id": "curtain_close",
+        "status": "ack_only",
+        "control_type": "position_command",
+        "state_authority": "submitted_only",
+        "verification_mode": "command_ack_only",
+        "state_tracking": "ack_only",
+        "expected_state": None,
+        "expected_states": [],
+        "actual_state": None,
+        **NO_POSITION_STATE_FIELDS,
+    }
+    assert ha.state_calls == []
+
+
+def test_external_observation_action_ignores_expected_effect(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"]["control_type"] = "stateless_toggle"
+    raw["actions"]["light_on"]["state_authority"] = "open_loop"
+    raw["actions"]["light_on"]["verification"] = {"mode": "external_observation"}
+    external_config = BridgeConfig.model_validate(raw)
+    client, ha, _, _ = make_client(external_config, token, tmp_path)
+
+    actions_response = client.get("/actions", headers=auth_headers(token))
+    action = next(action for action in actions_response.json() if action["action_id"] == "light_on")
+    assert action["control_type"] == "stateless_toggle"
+    assert action["state_authority"] == "open_loop"
+    assert action["verification_mode"] == "external_observation"
+    assert action["state_tracking"] == "external_required"
+    assert action["expected_effect"] is None
+
+    state_response = client.get("/actions/light_on/state", headers=auth_headers(token))
+
+    assert state_response.status_code == 200
+    assert state_response.json() == {
+        "ok": False,
+        "action_id": "light_on",
+        "status": "external_required",
+        "control_type": "stateless_toggle",
+        "state_authority": "open_loop",
+        "verification_mode": "external_observation",
+        "state_tracking": "external_required",
+        "expected_state": None,
+        "expected_states": [],
+        "actual_state": None,
+        **NO_POSITION_STATE_FIELDS,
+    }
+    assert ha.state_calls == []
+
+
+def test_command_ack_only_action_ignores_expected_effect(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["curtain_close"]["control_type"] = "stateless_command"
+    raw["actions"]["curtain_close"]["state_authority"] = "submitted_only"
+    raw["actions"]["curtain_close"]["verification"] = {"mode": "command_ack_only"}
+    raw["actions"]["curtain_close"]["expected_effect"] = {
+        "domain": "switch",
+        "service": "turn_off",
+        "entity_id": "switch.demo_unknown_aircon_wrapper",
+        "expected_state": "off",
+    }
+    ack_only_config = BridgeConfig.model_validate(raw)
+    client, ha, _, _ = make_client(ack_only_config, token, tmp_path)
+
+    actions_response = client.get("/actions", headers=auth_headers(token))
+    action = next(action for action in actions_response.json() if action["action_id"] == "curtain_close")
+    assert action["control_type"] == "stateless_command"
+    assert action["state_authority"] == "submitted_only"
+    assert action["verification_mode"] == "command_ack_only"
+    assert action["state_tracking"] == "ack_only"
+    assert action["expected_effect"] is None
+
+    state_response = client.get("/actions/curtain_close/state", headers=auth_headers(token))
+
+    assert state_response.status_code == 200
+    assert state_response.json() == {
+        "ok": False,
+        "action_id": "curtain_close",
+        "status": "ack_only",
+        "control_type": "stateless_command",
+        "state_authority": "submitted_only",
+        "verification_mode": "command_ack_only",
+        "state_tracking": "ack_only",
+        "expected_state": None,
+        "expected_states": [],
+        "actual_state": None,
+        **NO_POSITION_STATE_FIELDS,
+    }
+    assert ha.state_calls == []
+
+
+def test_climate_mode_action_tracks_hvac_state(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["aircon_cool"] = {
+        "label": "エアコンを冷房にする",
+        "ha_script": "script.demo_aircon_cool",
+        "confirm_required": True,
+        "response_text": "エアコンを冷房にしました。",
+        "control_type": "mode_command",
+        "state_authority": "ha_entity",
+        "verification": {
+            "mode": "ha_state",
+            "accepted_states": ["cool"],
+            "settle_seconds": 5,
+            "timeout_seconds": 60,
+        },
+        "expected_effect": {
+            "domain": "climate",
+            "service": "set_hvac_mode",
+            "entity_id": "climate.demo_aircon",
+            "expected_state": "cool",
+        },
+    }
+    climate_config = BridgeConfig.model_validate(raw)
+    ha = FakeHomeAssistant(states={"climate.demo_aircon": "cool"})
+    client, _, _, _ = make_client(climate_config, token, tmp_path, ha=ha)
+
+    actions_response = client.get("/actions", headers=auth_headers(token))
+    action = next(action for action in actions_response.json() if action["action_id"] == "aircon_cool")
+    assert action["control_type"] == "mode_command"
+    assert action["state_authority"] == "ha_entity"
+    assert action["verification_mode"] == "ha_state"
+    assert action["state_tracking"] == "tracked"
+    assert action["expected_states"] == ["cool"]
+    assert action["settle_seconds"] == 5
+    assert action["timeout_seconds"] == 60
+    assert action["expected_effect"] == {
+        "domain": "climate",
+        "service": "set_hvac_mode",
+        "entity_id": "climate.demo_aircon",
+        "expected_state": "cool",
+    }
+
+    state_response = client.get("/actions/aircon_cool/state", headers=auth_headers(token))
+
+    assert state_response.status_code == 200
+    assert state_response.json() == {
+        "ok": True,
+        "action_id": "aircon_cool",
+        "status": "matched",
+        "control_type": "mode_command",
+        "state_authority": "ha_entity",
+        "verification_mode": "ha_state",
+        "state_tracking": "tracked",
+        "expected_state": "cool",
+        "expected_states": ["cool"],
+        "actual_state": "cool",
+        **NO_POSITION_STATE_FIELDS,
+    }
+    assert ha.state_calls == ["climate.demo_aircon"]
+
+
+def test_action_state_unavailable_is_redacted(config, token, tmp_path):
+    client, _, _, _ = make_client(config, token, tmp_path, ha=FakeHomeAssistant(fail_state=True))
+
+    response = client.get("/actions/light_on/state", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["status"] == "unavailable"
+    assert body["expected_state"] == "on"
+    assert body["expected_states"] == ["on"]
+    assert body["actual_state"] is None
+    assert "entity_id" not in body
+    assert "state unavailable" not in json.dumps(body)
 
 
 def test_preview_logs_without_executing(config, token, tmp_path):
@@ -163,6 +816,8 @@ def test_post_body_is_optional(config, token, tmp_path):
     assert response.status_code == 200
     assert response.json()["executed"] is True
     assert ha.calls == ["script.demo_light_on"]
+    assert len(ha.timeouts) == 1
+    assert 0 < ha.timeouts[0] <= config.home_assistant.timeout_seconds
 
 
 def test_execute_returns_tracking_metadata_and_logs_it(config, token, tmp_path):
@@ -184,6 +839,14 @@ def test_execute_returns_tracking_metadata_and_logs_it(config, token, tmp_path):
     assert body["service"] == "turn_on"
     assert body["entity_id"] == "light.demo_room"
     assert body["expected_state"] == "on"
+    assert body["control_type"] == "stateful_target"
+    assert body["state_authority"] == "ha_entity"
+    assert body["verification_mode"] == "ha_state"
+    assert body["state_tracking"] == "tracked"
+    assert body["proof_ceiling"] == "ha_visible_state_checkstate_layer"
+    assert body["live_test_candidate"] is False
+    assert body["live_test_readiness"] == "not_live_test_candidate"
+    assert body["live_test_blockers"] == []
     assert body["expected_effect"] == {
         "domain": "light",
         "service": "turn_on",
@@ -197,6 +860,10 @@ def test_execute_returns_tracking_metadata_and_logs_it(config, token, tmp_path):
     assert log["execution_id"] == body["execution_id"]
     assert log["issued_at"] == body["issued_at"]
     assert log["status"] == "submitted"
+    assert log["control_type"] == "stateful_target"
+    assert log["state_authority"] == "ha_entity"
+    assert log["verification_mode"] == "ha_state"
+    assert log["state_tracking"] == "tracked"
     assert log["expected_effect"] == body["expected_effect"]
 
 
@@ -244,6 +911,118 @@ def test_dry_run_does_not_call_home_assistant(config, token, tmp_path):
     assert response.status_code == 200
     assert response.json()["executed"] is False
     assert response.json()["message"].startswith("dry-run:")
+    assert ha.calls == []
+
+
+def test_repeated_dry_run_request_id_is_classified_without_execution(config, token, tmp_path):
+    client, ha, log_path, _ = make_client(config, token, tmp_path)
+    payload = {"source": "dify", "request_id": "req-dry-dup", "dry_run": True}
+
+    first = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+    second = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+
+    assert first.status_code == 200
+    assert first.json()["status"] == "dry_run"
+    assert second.status_code == 200
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["executed"] is False
+    assert second.json()["execution_id"] is None
+    assert ha.calls == []
+    logs = read_logs(log_path)
+    assert [log["event"] for log in logs] == ["execute_dry_run", "execute_dry_run_duplicate"]
+
+
+def test_conflicting_dry_run_request_id_is_rejected_without_execution(config, token, tmp_path):
+    client, ha, log_path, _ = make_client(config, token, tmp_path)
+
+    first = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-dry-conflict", "dry_run": True},
+    )
+    second = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={
+            "source": "different-client",
+            "request_id": "req-dry-conflict",
+            "dry_run": True,
+            "user_text": "照明をつけて",
+        },
+    )
+
+    assert first.status_code == 200
+    assert first.json()["status"] == "dry_run"
+    assert second.status_code == 200
+    assert second.json()["ok"] is False
+    assert second.json()["status"] == "failed"
+    assert second.json()["error"] == "dry_run_request_conflict"
+    assert ha.calls == []
+    logs = read_logs(log_path)
+    assert logs[-1]["event"] == "execute_dry_run_conflict"
+    assert logs[-1]["error"] == "dry_run_request_conflict"
+    assert "照明をつけて" not in json.dumps(logs[-1], ensure_ascii=False)
+
+
+def test_dry_run_request_id_cannot_be_reused_for_real_execution(config, token, tmp_path):
+    client, ha, log_path, _ = make_client(config, token, tmp_path)
+
+    first = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-dry-then-real", "dry_run": True},
+    )
+    second = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-dry-then-real"},
+    )
+
+    assert first.status_code == 200
+    assert first.json()["status"] == "dry_run"
+    assert second.status_code == 200
+    assert second.json()["status"] == "failed"
+    assert second.json()["error"] == "dry_run_request_conflict"
+    assert ha.calls == []
+    assert [log["event"] for log in read_logs(log_path)] == [
+        "execute_dry_run",
+        "execute_dry_run_conflict",
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"source": "dify", "dry_run": True},
+        {"source": "dify", "request_id": "", "dry_run": True},
+        {"source": "dify", "request_id": "req-dry-\n\t-雪", "dry_run": True},
+    ],
+)
+def test_dry_run_missing_empty_and_unusual_request_ids_do_not_execute(config, token, tmp_path, payload):
+    client, ha, _, _ = make_client(config, token, tmp_path)
+
+    response = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "dry_run"
+    assert response.json()["executed"] is False
+    assert ha.calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"source": "dify", "request_id": "x" * 161, "dry_run": True},
+        {"source": "dify", "request_id": "req-dry-bad", "dry_run": {"nested": True}},
+        {"source": "dify", "request_id": "req-dry-extra", "dry_run": True, "ha_script": "script.any"},
+    ],
+)
+def test_malformed_dry_run_bodies_are_rejected_before_execution(config, token, tmp_path, payload):
+    client, ha, _, _ = make_client(config, token, tmp_path)
+
+    response = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+
+    assert response.status_code == 422
     assert ha.calls == []
 
 
@@ -418,6 +1197,363 @@ def test_duplicate_request_id_is_not_executed_twice(config, token, tmp_path):
     assert any(log["event"] == "execute_duplicate_request" for log in logs)
 
 
+def test_thought_core_execution_propagates_deadline_and_tracking_without_state_read(
+    config,
+    token,
+    tmp_path,
+):
+    client, ha, _, _ = make_client(config, token, tmp_path)
+    request_id = "turn-light-attempt-1"
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={
+            "source": "thought-core",
+            "request_id": request_id,
+            "deadline_monotonic_s": monotonic() + 5.0,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["execution_lifecycle_class"] == "submission_completed"
+    assert body["submission_count"] == 1
+    assert body["terminal"] is True
+    assert ha.calls == ["script.demo_light_on"]
+    assert ha.state_calls == []
+
+    tracking = client.get(
+        f"/executions/{body['execution_id']}",
+        headers=auth_headers(token),
+        params={"action_id": "light_on", "request_id": request_id},
+    )
+    assert tracking.status_code == 200
+    assert tracking.json() == {
+        "ok": True,
+        "found": True,
+        "action_match": True,
+        "request_match": True,
+        "execution_lifecycle_class": "submission_completed",
+        "submission_count": 1,
+        "terminal": True,
+        "elapsed_ms": tracking.json()["elapsed_ms"],
+        "proof_ceiling": "bridge_submission_tracking_only",
+    }
+    assert tracking.json()["elapsed_ms"] >= 0
+    serialized = json.dumps(tracking.json())
+    assert body["execution_id"] not in serialized
+    assert request_id not in serialized
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "source": "thought-core",
+            "request_id": "private\nmarker",
+            "deadline_monotonic_s": 1.0,
+        },
+        {
+            "source": "thought-core",
+            "request_id": "turn-too-far-attempt-1",
+            "deadline_monotonic_s": monotonic() + 181.0,
+        },
+    ],
+)
+def test_thought_core_invalid_execution_contract_fails_before_submit(
+    config,
+    token,
+    tmp_path,
+    payload,
+):
+    client, ha, _, _ = make_client(config, token, tmp_path)
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json=payload,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["error"] == "invalid_execution_contract"
+    assert response.json()["execution_lifecycle_class"] == "failed_before_submit"
+    assert response.json()["submission_count"] == 0
+    assert response.json()["execution_id"] is None
+    assert response.json()["request_id"] is None
+    assert ha.calls == []
+
+
+def test_expired_thought_core_request_is_terminal_and_never_retried(config, token, tmp_path):
+    client, ha, _, _ = make_client(config, token, tmp_path)
+    payload = {
+        "source": "thought-core",
+        "request_id": "turn-expired-attempt-1",
+        "deadline_monotonic_s": monotonic() - 0.01,
+    }
+    first = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+    second = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+
+    assert first.json()["status"] == "expired"
+    assert first.json()["execution_lifecycle_class"] == "expired_before_submit"
+    assert first.json()["submission_count"] == 0
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["execution_id"] == first.json()["execution_id"]
+    assert second.json()["execution_lifecycle_class"] == "expired_before_submit"
+    assert ha.calls == []
+
+
+def test_unknown_submission_outcome_is_terminal_and_blocks_duplicate_retry(config, token, tmp_path):
+    ha = FakeHomeAssistant(fail=True, submission_outcome="submission_outcome_unknown")
+    client, _, _, _ = make_client(config, token, tmp_path, ha=ha)
+    payload = {
+        "source": "thought-core",
+        "request_id": "turn-unknown-attempt-1",
+        "deadline_monotonic_s": monotonic() + 5.0,
+    }
+    first = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+    second = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+
+    assert first.json()["status"] == "outcome_unknown"
+    assert first.json()["execution_lifecycle_class"] == "submission_outcome_unknown"
+    assert first.json()["submission_count"] is None
+    assert first.json()["error"] == "home_assistant_submission_outcome_unknown"
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["execution_id"] == first.json()["execution_id"]
+    assert second.json()["submission_count"] is None
+    assert ha.calls == ["script.demo_light_on"]
+
+
+def test_unexpected_home_assistant_exception_becomes_terminal_outcome_unknown(
+    config,
+    token,
+    tmp_path,
+):
+    class UnexpectedHomeAssistant(FakeHomeAssistant):
+        async def turn_on_script(self, script_entity_id: str, *, timeout_seconds=None):
+            del timeout_seconds
+            self.calls.append(script_entity_id)
+            raise RuntimeError("private raw failure detail")
+
+    ha = UnexpectedHomeAssistant()
+    client, _, log_path, _ = make_client(config, token, tmp_path, ha=ha)
+    payload = {
+        "source": "thought-core",
+        "request_id": "turn-unexpected-attempt-1",
+        "deadline_monotonic_s": monotonic() + 5.0,
+    }
+    first = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+    second = client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+
+    assert first.json()["status"] == "outcome_unknown"
+    assert first.json()["execution_lifecycle_class"] == "submission_outcome_unknown"
+    assert first.json()["submission_count"] is None
+    assert first.json()["terminal"] is True
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["execution_id"] == first.json()["execution_id"]
+    assert ha.calls == ["script.demo_light_on"]
+    serialized = json.dumps(first.json()) + log_path.read_text(encoding="utf-8")
+    assert "private raw failure detail" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_concurrent_duplicate_observes_in_flight_and_calls_home_assistant_once(
+    config,
+    token,
+    tmp_path,
+):
+    class BlockingHomeAssistant(FakeHomeAssistant):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def turn_on_script(self, script_entity_id: str, *, timeout_seconds=None):
+            del timeout_seconds
+            self.calls.append(script_entity_id)
+            self.started.set()
+            await self.release.wait()
+            return {"status_code": 200, "body": []}
+
+    ha = BlockingHomeAssistant()
+    app, _, _, _ = make_app(config, token, tmp_path, ha=ha)
+    payload = {
+        "source": "thought-core",
+        "request_id": "turn-concurrent-attempt-1",
+        "deadline_monotonic_s": monotonic() + 5.0,
+    }
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first_task = asyncio.create_task(
+            client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+        )
+        await asyncio.wait_for(ha.started.wait(), timeout=1.0)
+        duplicate = await client.post(
+            "/actions/light_on/execute",
+            headers=auth_headers(token),
+            json=payload,
+        )
+        assert duplicate.json()["status"] == "duplicate"
+        assert duplicate.json()["execution_lifecycle_class"] == "submission_in_flight"
+        assert duplicate.json()["submission_count"] is None
+        assert duplicate.json()["terminal"] is False
+        assert ha.calls == ["script.demo_light_on"]
+        ha.release.set()
+        first = await asyncio.wait_for(first_task, timeout=1.0)
+
+    assert first.json()["execution_lifecycle_class"] == "submission_completed"
+    assert first.json()["submission_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_in_flight_request_is_tracked_as_outcome_unknown(
+    config,
+    token,
+    tmp_path,
+):
+    class BlockingHomeAssistant(FakeHomeAssistant):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+
+        async def turn_on_script(self, script_entity_id: str, *, timeout_seconds=None):
+            del timeout_seconds
+            self.calls.append(script_entity_id)
+            self.started.set()
+            await asyncio.Event().wait()
+
+    ha = BlockingHomeAssistant()
+    app, _, _, _ = make_app(config, token, tmp_path, ha=ha)
+    request_id = "turn-cancel-attempt-1"
+    payload = {
+        "source": "thought-core",
+        "request_id": request_id,
+        "deadline_monotonic_s": monotonic() + 5.0,
+    }
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        task = asyncio.create_task(
+            client.post("/actions/light_on/execute", headers=auth_headers(token), json=payload)
+        )
+        await asyncio.wait_for(ha.started.wait(), timeout=1.0)
+        execution_id = next(iter(app.state.execution_requests.values()))["execution_id"]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        tracking = await client.get(
+            f"/executions/{execution_id}",
+            headers=auth_headers(token),
+            params={"action_id": "light_on", "request_id": request_id},
+        )
+
+    assert tracking.json()["execution_lifecycle_class"] == "submission_outcome_unknown"
+    assert tracking.json()["submission_count"] is None
+    assert tracking.json()["terminal"] is True
+    assert ha.calls == ["script.demo_light_on"]
+
+
+def test_execution_request_pruning_never_removes_in_flight_records(
+    config,
+    token,
+    tmp_path,
+    monkeypatch,
+):
+    app, _, _, _ = make_app(config, token, tmp_path)
+    app.state.execution_requests = {
+        "in-flight": {
+            "execution_id": "in-flight",
+            "terminal": False,
+            "expires_at": 0.0,
+        },
+        "terminal": {
+            "execution_id": "terminal",
+            "terminal": True,
+            "expires_at": 0.0,
+        },
+    }
+    monkeypatch.setattr(app_module, "monotonic", lambda: 10.0)
+
+    app_module._prune_execution_requests(app)
+
+    assert list(app.state.execution_requests) == ["in-flight"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exception_factory", "expected_outcome"),
+    [
+        (
+            lambda request: httpx.ConnectError("connect", request=request),
+            "failed_before_submit",
+        ),
+        (
+            lambda request: httpx.ReadTimeout("read", request=request),
+            "submission_outcome_unknown",
+        ),
+    ],
+)
+async def test_home_assistant_transport_failure_classification(
+    config,
+    monkeypatch,
+    exception_factory,
+    expected_outcome,
+):
+    class RaisingAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, *, headers, json):
+            del headers, json
+            raise exception_factory(httpx.Request("POST", url))
+
+    monkeypatch.setattr("home_control_bridge.home_assistant.httpx.AsyncClient", RaisingAsyncClient)
+    client = HomeAssistantClient(config.home_assistant, "test-token")
+    with pytest.raises(HomeAssistantError) as caught:
+        await client.turn_on_script("script.demo", timeout_seconds=0.5)
+    assert caught.value.submission_outcome == expected_outcome
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "expected_outcome"),
+    [
+        (400, "failed_before_submit"),
+        (408, "submission_outcome_unknown"),
+        (429, "submission_outcome_unknown"),
+        (500, "submission_outcome_unknown"),
+    ],
+)
+async def test_home_assistant_http_status_failure_classification(
+    config,
+    monkeypatch,
+    status_code,
+    expected_outcome,
+):
+    class StatusAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, *, headers, json):
+            del headers, json
+            return httpx.Response(status_code, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("home_control_bridge.home_assistant.httpx.AsyncClient", StatusAsyncClient)
+    client = HomeAssistantClient(config.home_assistant, "test-token")
+    with pytest.raises(HomeAssistantError) as caught:
+        await client.turn_on_script("script.demo", timeout_seconds=0.5)
+    assert caught.value.submission_outcome == expected_outcome
+
+
 def test_confirm_preview_issues_one_time_confirmation_token(config, token, tmp_path):
     client, _, _, _ = make_client(config, token, tmp_path)
 
@@ -431,6 +1567,376 @@ def test_confirm_preview_issues_one_time_confirmation_token(config, token, tmp_p
     assert response.json()["executed"] is False
     assert response.json()["confirmation_required"] is True
     assert isinstance(response.json()["confirmation_token"], str)
+
+
+def test_fault_mode_off_ignores_configured_faults(config, token, tmp_path):
+    fault_config = config_with_faults(
+        config,
+        [
+            {
+                "match": {"action_id": "light_on"},
+                "scenario": "fail_always",
+                "message": "simulated failure",
+            }
+        ],
+        enabled=False,
+    )
+    client, ha, log_path, _ = make_client(fault_config, token, tmp_path)
+
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-fault-off"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["status"] == "submitted"
+    assert ha.calls == ["script.demo_light_on"]
+    assert all(log["event"] != "fault_injected" for log in read_logs(log_path))
+
+
+def test_fault_mode_requires_config_and_env(config, token, tmp_path, monkeypatch):
+    fault_config = config_with_faults(
+        config,
+        [{"match": {"source": "dify", "action_id": "light_on"}, "scenario": "always_success"}],
+        enabled=False,
+    )
+    monkeypatch.setenv("HOME_CONTROL_FAULT_MODE", "1")
+    client, ha, _, _ = make_client(fault_config, token, tmp_path)
+
+    health = client.get("/health")
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-fault-env"},
+    )
+
+    assert health.status_code == 200
+    assert health.json()["fault_mode"] is False
+    assert health.json()["fault_rules_count"] == 0
+    assert response.status_code == 200
+    assert response.json()["status"] == "submitted"
+    assert ha.calls == ["script.demo_light_on"]
+
+
+def test_fault_always_success_returns_submitted_without_home_assistant(config, token, fault_mode, tmp_path):
+    del fault_mode
+    fault_config = config_with_faults(
+        config,
+        [{"match": {"source": "dify", "action_id": "light_on"}, "scenario": "always_success"}],
+    )
+    client, ha, log_path, _ = make_client(fault_config, token, tmp_path)
+
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-fault-success"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["executed"] is True
+    assert body["status"] == "submitted"
+    assert_uuid(body["execution_id"])
+    assert body["expected_state"] == "on"
+    assert ha.calls == []
+    logs = read_logs(log_path)
+    assert logs[0]["event"] == "fault_injected"
+    assert logs[0]["scenario"] == "always_success"
+    assert logs[0]["attempt"] == 1
+    assert logs[0]["source"] == "dify"
+    assert logs[0]["action_id"] == "light_on"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_statuses"),
+    [
+        ("fail_once_then_success", ["failed", "submitted"]),
+        ("fail_twice_then_success", ["failed", "failed", "submitted"]),
+        ("timeout_once", ["failed", "submitted"]),
+    ],
+)
+@pytest.mark.parametrize("attempt_suffix", ["attempt", "hca"])
+def test_fault_transient_scenarios_track_attempts_by_normalized_request_id(
+    config,
+    token,
+    fault_mode,
+    tmp_path,
+    scenario,
+    expected_statuses,
+    attempt_suffix,
+):
+    del fault_mode
+    fault_config = config_with_faults(
+        config,
+        [
+            {
+                "match": {
+                    "action_id": "light_on",
+                    "request_id_regex": "^workflow-1",
+                },
+                "scenario": scenario,
+                "message": "simulated transient failure",
+            }
+        ],
+    )
+    client, ha, log_path, _ = make_client(fault_config, token, tmp_path)
+
+    responses = [
+        client.post(
+            "/actions/light_on/execute",
+            headers=auth_headers(token),
+            json={"source": "dify", "request_id": f"workflow-1-{attempt_suffix}-{index}"},
+        )
+        for index in range(1, len(expected_statuses) + 1)
+    ]
+
+    assert [response.status_code for response in responses] == [200] * len(expected_statuses)
+    assert [response.json()["status"] for response in responses] == expected_statuses
+    assert [response.json()["ok"] for response in responses] == [
+        status == "submitted" for status in expected_statuses
+    ]
+    assert ha.calls == []
+    assert [log["attempt"] for log in read_logs(log_path)] == list(range(1, len(expected_statuses) + 1))
+
+
+def test_fault_fail_always_returns_failed_without_home_assistant(config, token, fault_mode, tmp_path):
+    del fault_mode
+    fault_config = config_with_faults(
+        config,
+        [{"match": {"action_id": "light_on", "user_text_contains": "照明"}, "scenario": "fail_always"}],
+    )
+    client, ha, log_path, _ = make_client(fault_config, token, tmp_path)
+
+    response = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-fail-always", "user_text": "照明をつけて"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["status"] == "failed"
+    assert response.json()["error"] == "home_assistant_request_failed"
+    assert ha.calls == []
+    assert read_logs(log_path)[0]["scenario"] == "fail_always"
+
+
+def test_fault_confirmation_required_uses_one_time_token(config, token, fault_mode, tmp_path):
+    del fault_mode
+    fault_config = config_with_faults(
+        config,
+        [{"match": {"action_id": "light_on"}, "scenario": "confirmation_required"}],
+    )
+    client, ha, log_path, _ = make_client(fault_config, token, tmp_path)
+
+    first = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-fault-confirm-1"},
+    )
+    second = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-fault-confirm-2", "confirmed": True},
+    )
+    third = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={
+            "source": "dify",
+            "request_id": "req-fault-confirm-3",
+            "confirmed": True,
+            "confirmation_token": first.json()["confirmation_token"],
+        },
+    )
+
+    assert first.status_code == 200
+    assert first.json()["status"] == "confirmation_required"
+    assert isinstance(first.json()["confirmation_token"], str)
+    assert second.status_code == 200
+    assert second.json()["status"] == "confirmation_required"
+    assert third.status_code == 200
+    assert third.json()["status"] == "submitted"
+    assert_uuid(third.json()["execution_id"])
+    assert ha.calls == []
+    assert [log["status"] for log in read_logs(log_path)] == [
+        "confirmation_required",
+        "confirmation_required",
+        "submitted",
+    ]
+
+
+def test_fault_unsupported_action_can_simulate_unallowlisted_response(config, token, fault_mode, tmp_path):
+    del fault_mode
+    fault_config = config_with_faults(
+        config,
+        [
+            {
+                "match": {"action_id": "unknown_action", "source": "dify"},
+                "scenario": "unsupported_action",
+            }
+        ],
+    )
+    client, ha, log_path, _ = make_client(fault_config, token, tmp_path)
+
+    response = client.post(
+        "/actions/unknown_action/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-unsupported"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["status"] == "failed"
+    assert response.json()["error"] == "unsupported_action"
+    assert ha.calls == []
+    assert read_logs(log_path)[0]["scenario"] == "unsupported_action"
+
+
+def test_fault_duplicate_scenario_does_not_break_existing_duplicate_tracking(config, token, fault_mode, tmp_path):
+    del fault_mode
+    fault_config = config_with_faults(
+        config,
+        [
+            {
+                "match": {"action_id": "light_on", "request_id_suffix": "-sim-dup"},
+                "scenario": "duplicate",
+            }
+        ],
+    )
+    client, ha, log_path, _ = make_client(fault_config, token, tmp_path)
+
+    simulated = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-sim-dup"},
+    )
+    first_real = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-real-dup"},
+    )
+    second_real = client.post(
+        "/actions/light_on/execute",
+        headers=auth_headers(token),
+        json={"source": "dify", "request_id": "req-real-dup"},
+    )
+
+    assert simulated.status_code == 200
+    assert simulated.json()["status"] == "duplicate"
+    assert first_real.status_code == 200
+    assert first_real.json()["status"] == "submitted"
+    assert second_real.status_code == 200
+    assert second_real.json()["status"] == "duplicate"
+    assert second_real.json()["execution_id"] == first_real.json()["execution_id"]
+    assert ha.calls == ["script.demo_light_on"]
+    logs = read_logs(log_path)
+    assert logs[0]["event"] == "fault_injected"
+    assert any(log["event"] == "execute_duplicate_request" for log in logs)
+
+
+def test_fault_attempt_state_is_bounded(config, fault_mode):
+    del fault_mode
+    fault_config = config_with_faults(
+        config,
+        [{"match": {"action_id": "light_on"}, "scenario": "fail_once_then_success"}],
+    )
+    state = {}
+
+    for index in range(MAX_FAULT_ATTEMPT_STATE + 20):
+        evaluate_fault(
+            fault_config,
+            state,
+            FaultContext(
+                action_id="light_on",
+                source="dify",
+                request_id=f"req-{index}",
+                user_text=None,
+                confirmed=False,
+            ),
+        )
+
+    assert len(state) <= MAX_FAULT_ATTEMPT_STATE
+
+
+def test_config_rejects_potentially_catastrophic_fault_regex(config):
+    with pytest.raises(ValidationError):
+        config_with_faults(
+            config,
+            [
+                {
+                    "match": {"user_text_regex": "(a+)+$"},
+                    "scenario": "fail_always",
+                }
+            ],
+        )
+
+
+def test_config_rejects_position_proof_without_threshold(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"]["verification"]["position"] = {"attribute": "current_position"}
+
+    with pytest.raises(ValidationError):
+        BridgeConfig.model_validate(raw)
+
+
+def test_config_rejects_position_proof_without_ha_state_mode(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["curtain_close"]["verification"] = {
+        "mode": "command_ack_only",
+        "position": {"attribute": "current_position", "max": 5},
+    }
+
+    with pytest.raises(ValidationError):
+        BridgeConfig.model_validate(raw)
+
+
+def test_config_rejects_unknown_restore_or_stop_action_refs(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"]["restore_action_id"] = "missing_action"
+
+    with pytest.raises(ValidationError):
+        BridgeConfig.model_validate(raw)
+
+
+def test_live_readiness_does_not_block_candidate_without_restore_or_stop(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"]["live_test_candidate"] = True
+
+    loaded = BridgeConfig.model_validate(raw)
+    payload = action_preview_payload("light_on", loaded.actions["light_on"])
+
+    assert payload["live_test_readiness"] == "test_now"
+    assert payload["live_test_blockers"] == []
+
+
+def test_restore_not_required_allows_command_stimulus_candidate(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["curtain_close"]["live_test_candidate"] = True
+    raw["actions"]["curtain_close"]["restore_required"] = False
+
+    loaded = BridgeConfig.model_validate(raw)
+    payload = action_preview_payload("curtain_close", loaded.actions["curtain_close"])
+
+    assert payload["live_test_readiness"] == "test_now"
+    assert payload["restore_required"] is False
+    assert payload["state_tracking"] == "ack_only"
+    assert payload["live_test_blockers"] == []
+
+
+def test_terminal_action_with_ha_state_can_be_live_test_candidate(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"]["live_test_candidate"] = True
+    raw["actions"]["light_on"]["terminal_action"] = True
+
+    loaded = BridgeConfig.model_validate(raw)
+    payload = action_preview_payload("light_on", loaded.actions["light_on"])
+
+    assert payload["live_test_readiness"] == "test_now"
+    assert payload["live_test_blockers"] == []
 
 
 def test_placeholder_bridge_token_is_rejected(monkeypatch):
@@ -450,6 +1956,105 @@ def test_config_rejects_non_script_entities():
                         "label": "玄関を開ける",
                         "ha_script": "lock.front_door",
                         "response_text": "玄関を開けました。",
+                    }
+                },
+            }
+        )
+
+
+def test_source_no_live_fuzz_classifies_open_loop_toggles_as_external_required():
+    config_path = Path(__file__).resolve().parents[1] / "config" / "home-control.example.yaml"
+    loaded = load_config(config_path)
+
+    for action_id in ("light_toggle",):
+        action = loaded.actions[action_id]
+        payload = action_preview_payload(action_id, action)
+
+        assert payload["control_type"] == "stateless_toggle"
+        assert payload["state_authority"] == "open_loop"
+        assert payload["verification_mode"] == "external_observation"
+        assert payload["state_tracking"] == "external_required"
+        assert payload["expected_states"] == []
+        assert "expected_effect" not in payload
+
+
+def test_source_no_live_fuzz_ha_state_without_expected_effect_is_unsupported(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"].pop("expected_effect")
+    raw["actions"]["light_on"]["verification"] = {"mode": "ha_state"}
+
+    loaded = BridgeConfig.model_validate(raw)
+    payload = action_preview_payload("light_on", loaded.actions["light_on"])
+
+    assert payload["verification_mode"] == "ha_state"
+    assert payload["state_tracking"] == "unsupported"
+    assert payload["expected_states"] == []
+    assert "expected_effect" not in payload
+
+
+def test_source_no_live_fuzz_expected_effect_without_explicit_metadata_is_not_tracked(config, token, tmp_path):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["light_on"].pop("control_type")
+    raw["actions"]["light_on"].pop("state_authority")
+    raw["actions"]["light_on"].pop("verification")
+
+    loaded = BridgeConfig.model_validate(raw)
+    payload = action_preview_payload("light_on", loaded.actions["light_on"])
+
+    assert payload["control_type"] == "script_wrapper"
+    assert payload["state_authority"] == "submitted_only"
+    assert payload["verification_mode"] == "command_ack_only"
+    assert payload["state_tracking"] == "ack_only"
+    assert payload["expected_states"] == []
+    assert "expected_effect" not in payload
+
+    client, ha, _, _ = make_client(loaded, token, tmp_path)
+    state_response = client.get("/actions/light_on/state", headers=auth_headers(token))
+
+    assert state_response.status_code == 200
+    assert state_response.json()["state_tracking"] == "ack_only"
+    assert ha.state_calls == []
+
+
+def test_source_no_live_fuzz_ack_only_with_expected_effect_is_not_tracked(config):
+    raw = config.model_dump(mode="json")
+    raw["actions"]["curtain_close"]["verification"] = {"mode": "command_ack_only"}
+    raw["actions"]["curtain_close"]["expected_effect"] = {
+        "domain": "cover",
+        "service": "close_cover",
+        "entity_id": "cover.demo_curtain",
+        "expected_state": "closed",
+    }
+
+    loaded = BridgeConfig.model_validate(raw)
+    payload = action_preview_payload("curtain_close", loaded.actions["curtain_close"])
+
+    assert payload["verification_mode"] == "command_ack_only"
+    assert payload["state_tracking"] == "ack_only"
+    assert payload["expected_states"] == []
+    assert "expected_effect" not in payload
+
+
+@pytest.mark.parametrize(
+    "ha_script",
+    [
+        "light.demo_room",
+        "scene.movie_mode",
+        "climate.demo_aircon",
+        "script.BadName",
+        "script.demo-action",
+    ],
+)
+def test_source_no_live_fuzz_rejects_unsafe_or_ambiguous_script_refs(ha_script):
+    with pytest.raises(ValidationError):
+        BridgeConfig.model_validate(
+            {
+                "home_assistant": {"base_url": "http://homeassistant.local:8123"},
+                "actions": {
+                    "ambiguous_action": {
+                        "label": "Ambiguous",
+                        "ha_script": ha_script,
+                        "response_text": "Rejected before live operation.",
                     }
                 },
             }

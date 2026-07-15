@@ -1,3 +1,21 @@
+#
+# Public demo/default/template config.
+#
+# This file is useful for source/static checks, catalog shape, and examples, but
+# it is not a proof-ready private/live Home Assistant config for another house.
+# For external HA verification, copy or generate an ignored private full-schema
+# config, replace demo script/entity values locally, and keep expected-effect
+# target plus verification metadata present. A short/minimal action-only override
+# can submit or acknowledge commands, but it cannot support HA-visible CheckState
+# proof or CheckTracking tracked_ready by itself.
+#
+# Fresh clones should select the private full-schema config or a reviewed
+# clone-local equivalent after env/config render, then pass a read-only parity
+# gate before any preview, dry-run, or live execute route. See:
+# docs/home-assistant-setup.md
+# Use CheckTracking for pre-execution metadata readiness; use CheckState only
+# for current-state/JIT or post-action/post-restore HA-visible state checks.
+
 home_assistant:
   base_url: "http://homeassistant.local:8123"
   token_env: "HOME_ASSISTANT_TOKEN"
@@ -14,37 +32,266 @@ udp_events:
   port: 7000
   event_type: "home_control_magic"
 
-actions:
-  light_on:
-    label: "照明をつける"
-    ha_script: "script.demo_light_on"
-    confirm_required: false
-    response_text: "照明をつけました。"
-    expected_effect:
-      domain: "light"
-      service: "turn_on"
-      entity_id: "light.demo_room"
-      expected_state: "on"
+faults:
+  enabled: false
+  enabled_env: "HOME_CONTROL_FAULT_MODE"
+  rules:
+    # Fault injection is ignored unless both faults.enabled is true and HOME_CONTROL_FAULT_MODE=1.
+    - match:
+        source: "dify"
+        action_id: "light_toggle"
+      scenario: "fail_once_then_success"
+      message: "simulated transient failure"
+    - match:
+        source: "dify"
+        action_id: "light_toggle"
+        request_id_prefix: "e2e-confirm"
+      scenario: "confirmation_required"
+      message: "simulated confirmation required"
 
-  light_off:
-    label: "照明を消す"
-    ha_script: "script.demo_light_off"
+actions:
+  # Standard appliance review universe:
+  # light_toggle, fan_on, fan_off, aircon_on, aircon_off,
+  # door_open, door_close, door_stop, vacuum_start, vacuum_return, vacuum_pause.
+  #
+  # Keep open-loop or command-only devices out of HA state proof. Promote an
+  # action to verification.mode: ha_state only after the target entity can be
+  # read back reliably and an exact execute/wait/CheckState pass proves it.
+  light_toggle:
+    label: "照明トグルを送信"
+    ha_script: "script.demo_light_toggle"
     confirm_required: false
-    response_text: "照明を消しました。"
+    response_text: "照明トグル操作を送信しました。点灯/消灯の実状態は外部観測で確認してください。"
+    control_type: "stateless_toggle"
+    state_authority: "open_loop"
+    live_test_candidate: true
+    restore_required: false
+    verification:
+      mode: "external_observation"
+
+  fan_on:
+    label: "扇風機をつける"
+    ha_script: "script.demo_fan_on"
+    confirm_required: false
+    response_text: "扇風機をつける操作を送信しました。実際の稼働状態は外部観測で確認してください。"
+    control_type: "stateless_command"
+    state_authority: "submitted_only"
+    live_test_candidate: true
+    restore_required: false
+    verification:
+      mode: "command_ack_only"
+
+  fan_off:
+    label: "扇風機を止める"
+    ha_script: "script.demo_fan_off"
+    confirm_required: false
+    response_text: "扇風機を止める操作を送信しました。実際の停止状態は外部観測で確認してください。"
+    control_type: "stateless_command"
+    state_authority: "submitted_only"
+    live_test_candidate: true
+    restore_required: false
+    verification:
+      mode: "command_ack_only"
+
+  aircon_on:
+    label: "エアコンをつける"
+    ha_script: "script.demo_aircon_on"
+    confirm_required: true
+    response_text: "エアコンをつける操作を送信しました。実際の空調状態は外部観測で確認してください。"
+    control_type: "stateless_command"
+    state_authority: "submitted_only"
+    verification:
+      mode: "command_ack_only"
+
+  aircon_off:
+    label: "エアコンを止める"
+    ha_script: "script.demo_aircon_off"
+    confirm_required: true
+    response_text: "エアコンを止める操作を送信しました。実際の空調状態は外部観測で確認してください。"
+    control_type: "stateless_command"
+    state_authority: "submitted_only"
+    verification:
+      mode: "command_ack_only"
+
+  door_open:
+    label: "中扉を開ける"
+    ha_script: "script.demo_door_open"
+    confirm_required: true
+    response_text: "中扉を開ける操作を送信しました。HA の位置状態を確認してください。"
+    control_type: "position_command"
+    state_authority: "ha_entity"
+    live_test_candidate: true
+    restore_action_id: "door_close"
+    stop_action_id: "door_stop"
+    proof_ceiling: "ha_visible_cover_position_checkstate_layer"
+    verification:
+      mode: "ha_state"
+      accepted_states: ["open"]
+      settle_seconds: 8
+      timeout_seconds: 60
+      position:
+        attribute: "current_position"
+        min: 95
     expected_effect:
-      domain: "light"
-      service: "turn_off"
-      entity_id: "light.demo_room"
+      domain: "cover"
+      service: "open_cover"
+      entity_id: "cover.demo_curtain"
+      expected_state: "open"
+
+  door_close:
+    label: "中扉を閉める"
+    ha_script: "script.demo_door_close"
+    confirm_required: true
+    response_text: "中扉を閉める操作を送信しました。HA の位置状態を確認してください。"
+    control_type: "position_command"
+    state_authority: "ha_entity"
+    live_test_candidate: true
+    terminal_action: true
+    stop_action_id: "door_stop"
+    proof_ceiling: "ha_visible_cover_position_checkstate_layer"
+    verification:
+      mode: "ha_state"
+      accepted_states: ["closed"]
+      settle_seconds: 8
+      timeout_seconds: 60
+      position:
+        attribute: "current_position"
+        max: 5
+    expected_effect:
+      domain: "cover"
+      service: "close_cover"
+      entity_id: "cover.demo_curtain"
+      expected_state: "closed"
+
+  door_stop:
+    label: "中扉を止める"
+    ha_script: "script.demo_door_stop"
+    confirm_required: true
+    response_text: "中扉を止める操作を送信しました。停止状態は外部観測で確認してください。"
+    control_type: "position_command"
+    state_authority: "submitted_only"
+    proof_ceiling: "command_ack_only"
+    verification:
+      mode: "command_ack_only"
+
+  vacuum_start:
+    label: "掃除機を開始する"
+    ha_script: "script.demo_vacuum_start"
+    confirm_required: true
+    response_text: "掃除機を開始する操作を送信しました。HA の掃除機状態を確認してください。"
+    control_type: "job_command"
+    state_authority: "ha_entity"
+    live_test_candidate: true
+    restore_action_id: "vacuum_return"
+    proof_ceiling: "ha_visible_vacuum_state_checkstate_layer"
+    verification:
+      mode: "ha_state"
+      accepted_states: ["cleaning"]
+      settle_seconds: 10
+      timeout_seconds: 75
+    expected_effect:
+      domain: "vacuum"
+      service: "start"
+      entity_id: "vacuum.demo_cloud_target"
+      expected_state: "cleaning"
+
+  vacuum_return:
+    label: "掃除機を充電台に戻す"
+    ha_script: "script.demo_vacuum_return"
+    confirm_required: true
+    response_text: "掃除機を充電台に戻す操作を送信しました。HA の掃除機状態を確認してください。"
+    control_type: "job_command"
+    state_authority: "ha_entity"
+    live_test_candidate: true
+    terminal_action: true
+    proof_ceiling: "ha_visible_vacuum_return_checkstate_layer"
+    verification:
+      mode: "ha_state"
+      accepted_states: ["docked"]
+      settle_seconds: 10
+      timeout_seconds: 75
+    expected_effect:
+      domain: "vacuum"
+      service: "return_to_base"
+      # Track the script target entity only. Do not use all vacuum domain counts
+      # when Home Assistant exposes local and cloud entities for one appliance.
+      entity_id: "vacuum.demo_cloud_target"
+      expected_state: "docked"
+
+  vacuum_pause:
+    label: "掃除機を一時停止する"
+    ha_script: "script.demo_vacuum_pause"
+    confirm_required: true
+    response_text: "掃除機を一時停止する操作を送信しました。HA の掃除機状態を確認してください。"
+    control_type: "job_command"
+    state_authority: "ha_entity"
+    live_test_candidate: true
+    restore_action_id: "vacuum_return"
+    proof_ceiling: "ha_visible_vacuum_state_checkstate_layer"
+    verification:
+      mode: "ha_state"
+      accepted_states: ["paused"]
+      settle_seconds: 5
+      timeout_seconds: 60
+    expected_effect:
+      domain: "vacuum"
+      service: "pause"
+      entity_id: "vacuum.demo_cloud_target"
+      expected_state: "paused"
+
+  # Demo-only air conditioner candidates, separate from the twelve standard
+  # appliance actions above. Do not add expected_effect to an unknown switch
+  # wrapper just to make CheckState green. If a same-device climate entity is
+  # available, keep the service call inside a Home Assistant script and track
+  # the climate entity as a separate mode_command action.
+  aircon_cool:
+    label: "エアコンを冷房にする"
+    ha_script: "script.demo_aircon_cool"
+    confirm_required: true
+    response_text: "エアコンを冷房にする操作を送信しました。HA の空調状態を確認してください。"
+    control_type: "mode_command"
+    state_authority: "ha_entity"
+    live_test_candidate: true
+    restore_action_id: "aircon_hvac_off"
+    verification:
+      mode: "ha_state"
+      accepted_states: ["cool"]
+      settle_seconds: 5
+      timeout_seconds: 60
+    expected_effect:
+      domain: "climate"
+      service: "set_hvac_mode"
+      entity_id: "climate.demo_aircon"
+      expected_state: "cool"
+
+  aircon_hvac_off:
+    label: "エアコンを停止する"
+    ha_script: "script.demo_aircon_hvac_off"
+    confirm_required: true
+    response_text: "エアコンを停止する操作を送信しました。HA の空調状態を確認してください。"
+    control_type: "mode_command"
+    state_authority: "ha_entity"
+    live_test_candidate: true
+    terminal_action: true
+    verification:
+      mode: "ha_state"
+      accepted_states: ["off"]
+      settle_seconds: 5
+      timeout_seconds: 60
+    expected_effect:
+      domain: "climate"
+      service: "set_hvac_mode"
+      entity_id: "climate.demo_aircon"
       expected_state: "off"
 
-  curtain_close:
-    label: "カーテンを閉める"
-    ha_script: "script.curtain_close"
-    confirm_required: true
-    response_text: "カーテンを閉めました。"
-
+  # Demo-only scene/display action, not part of appliance state proof.
   projection_mode:
     label: "プロジェクションモードにする"
     ha_script: "script.projection_mode"
     confirm_required: true
-    response_text: "プロジェクションモードにしました。"
+    response_text: "プロジェクションモードにする操作を送信しました。"
+    control_type: "stateless_command"
+    state_authority: "submitted_only"
+    proof_ceiling: "not_home_control_appliance_coverage_row"
+    verification:
+      mode: "command_ack_only"

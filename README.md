@@ -1,264 +1,93 @@
 # Home Control Safety Bridge
 
-Dify / AITuberKit / sword-voice-agent から Home Assistant を安全に操作するためのローカルHTTPブリッジです。
+Home Assistant の script allowlist だけを外部クライアントへ公開するローカル HTTP ブリッジです。Dify / AITuberKit / sword-voice-agent などの音声・エージェント層から、家電操作を安全に中継するための単体モジュールとして使います。
 
-このブリッジは、リクエストから Home Assistant の任意サービス名、任意entity、任意URLを受け取りません。設定ファイルで許可した `action_id` だけを受け付け、内部では Home Assistant REST API の `/api/services/script/turn_on` だけを呼びます。Matter / SwitchBot の違いは Home Assistant の script 側に閉じ込めます。
-
-## API
-
-- `GET /health`
-- `GET /actions`
-- `POST /actions/{action_id}/preview`
-- `POST /actions/{action_id}/execute`
-
-`/health` 以外はAPI tokenが必要です。以下のどちらかのヘッダーを使えます。
-
-```http
-Authorization: Bearer <HOME_CONTROL_API_TOKEN>
-X-API-Token: <HOME_CONTROL_API_TOKEN>
-```
-
-## セットアップ
+## 初期セットアップ
 
 ```powershell
 uv sync --extra dev
-Copy-Item config/home-control.example.yaml config/home-control.yaml
-Copy-Item .env.example .env
+if (-not (Test-Path config/home-control.yaml)) {
+  Copy-Item config/home-control.example.yaml config/home-control.yaml
+}
+if (-not (Test-Path .env)) {
+  Copy-Item .env.example .env
+}
 ```
 
-環境変数を設定します。
+`config/home-control.yaml` の `home_assistant.base_url` と `actions` を環境に合わせて編集し、実行環境で必要な token を渡します。
+`.env` には実 token を入れるため、コミットしません。
+
+## dotenv / local config
+
+`.env.example` を `.env` にコピーし、少なくとも次を設定します。
+
+- `HOME_CONTROL_CONFIG`: 通常は `config/home-control.yaml`。
+- `HOME_CONTROL_API_TOKEN`: Dify / AITuberKit / Thought Core / Environment State Server がこの bridge へ送る local token。
+- `ENVIRONMENT_API_TOKEN`: Environment State Server 専用 token。空なら `HOME_CONTROL_API_TOKEN` を共有。
+- `HOME_ASSISTANT_TOKEN`: Home Assistant の Long-lived access token。
+
+Home Assistant 側では、`config/home-control.yaml` に書いた script / entity が実在し、Windows PC から
+`home_assistant.base_url` へ到達できる必要があります。
+
+## 通常起動
+
+Sword Agent OS の標準ディストリビューションから単独で起動する場合は、repo root で
+次の helper を使うと、生成済みの organ `.env` を bridge process に渡せます。
+secret 値は表示しません。
+
+```powershell
+pwsh -NoProfile -File .\scripts\start-home-control-bridge.ps1
+```
+
+この organ ディレクトリだけで起動する場合も、`.env` の存在だけでは process 環境に
+値は入りません。直接起動では、必ず `$env:` を設定するか、`uv run --env-file .env`
+を使ってください。
 
 ```powershell
 $env:HOME_CONTROL_CONFIG = "config/home-control.yaml"
 $env:HOME_CONTROL_API_TOKEN = (python -c "import secrets; print(secrets.token_urlsafe(32))")
 $env:HOME_ASSISTANT_TOKEN = "Home Assistant の Long-lived access token"
+uv run home-control-bridge
 ```
 
-`HOME_CONTROL_API_TOKEN` は32文字以上のランダム値にしてください。`.env.example` のプレースホルダーや短い値のままだと起動時/認証時に拒否されます。
-
-`config/home-control.yaml` の `home_assistant.base_url` と `actions` を自宅環境に合わせて編集してください。危険な操作、玄関、鍵、セキュリティ、暖房器具などは初期allowlistに入れないでください。
-
-## 起動
+直接 uvicorn で起動する場合:
 
 ```powershell
-uv run uvicorn home_control_bridge.main:app --host 127.0.0.1 --port 8787
+uv run --env-file .env python -m uvicorn home_control_bridge.main:app --host 127.0.0.1 --port 8787
 ```
 
-ローカルネットワーク内の別マシンから呼ぶ場合だけ `--host 0.0.0.0` を検討してください。その場合もルーター越しに公開しない構成を推奨します。
+plain `uv run uvicorn ...` は `.env` を自動では読みません。その場合、client 側が
+`.env` から token を読めても、server 側が `HOME_ASSISTANT_TOKEN` を受け取れず
+`/health` が `config_error`、`/actions` が `503` になることがあります。
 
-## 設定例
+## ローカル操作画面
 
-```yaml
-home_assistant:
-  base_url: "http://homeassistant.local:8123"
-  token_env: "HOME_ASSISTANT_TOKEN"
-server:
-  api_token_env: "HOME_CONTROL_API_TOKEN"
-  log_path: ".cache/home_control/events.jsonl"
-  min_api_token_length: 32
-udp_events:
-  enabled: false
-  host: "127.0.0.1"
-  port: 7000
-  event_type: "home_control_magic"
-actions:
-  light_on:
-    label: "照明をつける"
-    ha_script: "script.demo_light_on"
-    confirm_required: false
-    response_text: "照明をつけました。"
-    expected_effect:
-      domain: "light"
-      service: "turn_on"
-      entity_id: "light.demo_room"
-      expected_state: "on"
-  curtain_close:
-    label: "カーテンを閉める"
-    ha_script: "script.curtain_close"
-    confirm_required: true
-    response_text: "カーテンを閉めました。"
-```
+起動中の bridge は `http://127.0.0.1:8787/operator` にローカル操作画面を出します。
+画面は `GET /actions`、`/state`、`/preview`、`/execute` を人間が選べる形にした薄い UI です。
+API token は画面で入力し、ページ内のメモリにだけ保持します。HTML には token、Home Assistant
+URL、entity ID、secret は埋め込みません。
 
-`ha_script` は `script.*` だけ許可されます。`light.turn_on` や `lock.unlock` のようなHome Assistantサービスは、このブリッジの設定としても受け付けません。
+この画面は allowlist 済み action を可視化して、state / preview / dry-run / execute /
+confirm execute を選べるようにするものです。実行ボタンは既存の bridge API を呼ぶため、
+live 操作には従来どおり明示的な route / review / user authority が必要です。
+起動直後の route 用に、AC、light、fan、door、vacuum の代表 action は固定ショートカットとして
+route metadata と一緒に表示されます。これは action id を見えるようにするだけで、token 入力後も既存 API の
+認証・allowlist・確認・実行境界をそのまま使います。light / fan は command stimulus として
+復帰を要求しない候補、door は `door_open` に対する `door_close` 復帰候補、vacuum は
+`vacuum_return` 復帰/終端候補として表示します。`vacuum_start`、`vacuum_pause`、`door_stop`
+は別/条件付き row として扱い、この固定ショートカットには含めません。詳細 metadata が必要な場合は
+従来どおり `Load actions` で catalog を取得します。
 
-`expected_effect` は任意の追跡用メタデータです。Home Assistant へ実際に送るリクエストは引き続き `script.turn_on` だけで、`expected_effect` は後続の観測やユーザー確認と結合するための期待状態を表します。これは確定ラベルではありません。
+## 文書
 
-## UDPイベント
+- 責務境界: [docs/module-responsibilities.md](docs/module-responsibilities.md)
+- 接続契約: [docs/integration-contract.md](docs/integration-contract.md)
+- Dify からの呼び出し: [docs/api-usage.md](docs/api-usage.md)
+- UDP 演出通知: [docs/event-notifications.md](docs/event-notifications.md)
+- 疑似障害テスト: [docs/fault-injection.md](docs/fault-injection.md)
+- セキュリティ注意: [docs/security-notes.md](docs/security-notes.md)
+- OpenAPI: [docs/dify-openapi.yaml](docs/dify-openapi.yaml) または起動中の `/openapi.json`
+- Home Assistant script 例: [docs/home-assistant-scripts.example.yaml](docs/home-assistant-scripts.example.yaml)
+- 退避導線: [docs/retired-paths.md](docs/retired-paths.md)
 
-TouchDesignerなどの外部演出ツールに、家電操作の開始・完了・失敗をUDP JSONで通知できます。既定では無効です。
-
-```yaml
-udp_events:
-  enabled: true
-  host: "127.0.0.1"
-  port: 7000
-  event_type: "home_control_magic"
-```
-
-`execute` が実際にHome Assistantを呼ぶときだけ送信します。`preview`、`dry_run`、確認待ちの操作では送信しません。UDP送信に失敗しても家電操作は止めず、JSONLログに `udp_event_failed` を残します。
-
-開始時:
-
-```json
-{
-  "type": "home_control_magic",
-  "phase": "start",
-  "action_id": "light_off",
-  "label": "ライトを消す",
-  "source": "dify",
-  "request_id": "..."
-}
-```
-
-成功時は `phase: "done"`、失敗時は `phase: "error"` を送ります。`done` には `message`、`error` には `message` と汎用エラーコードが追加されます。Home Assistant 側の詳細エラー本文はUDPやHTTPレスポンスには出しません。
-
-## curl例
-
-```powershell
-curl.exe http://127.0.0.1:8787/health
-```
-
-```powershell
-curl.exe http://127.0.0.1:8787/actions `
-  -H "Authorization: Bearer $env:HOME_CONTROL_API_TOKEN"
-```
-
-```powershell
-curl.exe -X POST http://127.0.0.1:8787/actions/light_on/preview `
-  -H "Authorization: Bearer $env:HOME_CONTROL_API_TOKEN" `
-  -H "Content-Type: application/json" `
-  -d '{ "source": "dify", "request_id": "demo-1", "user_text": "照明をつけて" }'
-```
-
-```powershell
-curl.exe -X POST http://127.0.0.1:8787/actions/light_on/execute `
-  -H "Authorization: Bearer $env:HOME_CONTROL_API_TOKEN" `
-  -H "Content-Type: application/json" `
-  -d '{ "source": "dify", "request_id": "demo-2", "user_text": "照明をつけて" }'
-```
-
-確認必須の操作は、最初の `execute` では実行されません。
-
-```powershell
-curl.exe -X POST http://127.0.0.1:8787/actions/curtain_close/execute `
-  -H "Authorization: Bearer $env:HOME_CONTROL_API_TOKEN" `
-  -H "Content-Type: application/json" `
-  -d '{ "source": "dify", "request_id": "demo-3", "user_text": "カーテンを閉めて" }'
-```
-
-レスポンスの `confirmation_token` を確認後の実行リクエストに含めます。確認トークンは短時間で失効し、1回だけ使えます。
-
-```powershell
-curl.exe -X POST http://127.0.0.1:8787/actions/curtain_close/execute `
-  -H "Authorization: Bearer $env:HOME_CONTROL_API_TOKEN" `
-  -H "Content-Type: application/json" `
-  -d '{ "source": "dify", "request_id": "demo-4", "confirmed": true, "confirmation_token": "<confirmation_token>" }'
-```
-
-dry-runはHome Assistantを呼びません。
-
-```powershell
-curl.exe -X POST http://127.0.0.1:8787/actions/light_on/execute `
-  -H "Authorization: Bearer $env:HOME_CONTROL_API_TOKEN" `
-  -H "Content-Type: application/json" `
-  -d '{ "source": "dify", "request_id": "demo-5", "dry_run": true }'
-```
-
-`request_id` が同じ実行リクエストは短時間重複として扱い、Home Assistant への二重送信を避けます。Dify の `workflow_run_id` など、実行ごとに一意な値を入れてください。
-
-## Action tracking
-
-`execute` が実際に Home Assistant へ命令を送るとき、レスポンスには実行ごとの `execution_id`、`issued_at`、`status` が含まれます。既存の `action_id` は allowlist 上の操作名のままです。
-
-```json
-{
-  "ok": true,
-  "action_id": "light_on",
-  "execution_id": "2c9f9f6a-1f4b-43aa-89ef-4e1c7c73f9d2",
-  "executed": true,
-  "status": "submitted",
-  "issued_at": "2026-05-06T03:20:15.123456+00:00",
-  "domain": "light",
-  "service": "turn_on",
-  "entity_id": "light.demo_room",
-  "expected_state": "on",
-  "message": "照明をつけました。",
-  "speak": "照明をつけました。",
-  "request_id": "demo-2"
-}
-```
-
-`execution_id` は「Home Assistant に命令を出した」単位の correlation id です。camera-hub の観測やユーザー確認で得たラベルは、後続サービス側で `execution_id + observation_id + label` として結合してください。同じ `request_id` の重複リクエストには、元の `execution_id` が返ります。
-
-## Dify HTTP Request node例
-
-一覧取得:
-
-- Method: `GET`
-- URL: `http://127.0.0.1:8787/actions`
-- Headers:
-  - `Authorization`: `Bearer {{HOME_CONTROL_API_TOKEN}}`
-
-プレビュー:
-
-- Method: `POST`
-- URL: `http://127.0.0.1:8787/actions/{{action_id}}/preview`
-- Headers:
-  - `Authorization`: `Bearer {{HOME_CONTROL_API_TOKEN}}`
-  - `Content-Type`: `application/json`
-- Body:
-
-```json
-{
-  "source": "dify",
-  "request_id": "{{workflow_run_id}}",
-  "user_text": "{{query}}"
-}
-```
-
-実行:
-
-- Method: `POST`
-- URL: `http://127.0.0.1:8787/actions/{{action_id}}/execute`
-- Headers:
-  - `Authorization`: `Bearer {{HOME_CONTROL_API_TOKEN}}`
-  - `Content-Type`: `application/json`
-- Body:
-
-```json
-{
-  "source": "dify",
-  "request_id": "{{workflow_run_id}}",
-  "user_text": "{{query}}",
-  "confirmed": false,
-  "confirmation_token": "{{confirmation_token}}"
-}
-```
-
-Dify用OpenAPI schemaは [docs/dify-openapi.yaml](docs/dify-openapi.yaml) にあります。FastAPI標準の `/openapi.json` も利用できます。
-
-Dify / sword-voice-agent は、実行レスポンスの `execution_id` を保持して、camera-hub の `observation_id` とユーザー確認ラベルを learner-service へ渡します。
-
-```json
-{
-  "execution_id": "2c9f9f6a-1f4b-43aa-89ef-4e1c7c73f9d2",
-  "action_id": "light_on",
-  "observation_id": "obs_20260506_122018",
-  "label": "on",
-  "label_source": "user_confirmation"
-}
-```
-
-## Home Assistant script例
-
-[docs/home-assistant-scripts.example.yaml](docs/home-assistant-scripts.example.yaml) を参照してください。SwitchBot Cloud APIやMatter機器の個別制御は、Home Assistant側のscriptに書きます。
-
-## 操作ログ
-
-既定では `.cache/home_control/events.jsonl` にJSONLで保存します。API token、Authorization、password、secretを含むキーは保存しません。ユーザー発話本文は保存せず、本文の有無と文字数だけを残します。
-
-## テスト
-
-```powershell
-uv run pytest
-```
+`docs/archive/` は履歴確認用です。通常の実装判断では上記の文書を参照します。

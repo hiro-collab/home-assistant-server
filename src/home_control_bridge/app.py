@@ -1,24 +1,462 @@
 from __future__ import annotations
 
+import asyncio
 import secrets
+import os
+import re
+from hashlib import sha256
 from datetime import UTC, datetime
+from math import isfinite
+from pathlib import Path
 from time import monotonic
 from typing import Annotated
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from .audit import JsonlAuditLogger
-from .config import ActionConfig, BridgeConfig, ConfigError, action_preview_payload, get_required_secret, load_config
-from .home_assistant import HomeAssistantClient, HomeAssistantError
-from .schemas import ActionRequest, ActionResponse, ActionSummary, HealthResponse
+from .config import (
+    ActionConfig,
+    BridgeConfig,
+    ConfigError,
+    action_control_type,
+    action_expected_states,
+    action_live_test_blockers,
+    action_live_test_readiness,
+    action_preview_payload,
+    action_proof_ceiling,
+    action_public_expected_effect,
+    action_public_position_proof,
+    action_settle_seconds,
+    action_state_authority,
+    action_state_tracking_status,
+    action_timeout_seconds,
+    action_verification_mode,
+    get_required_secret,
+    load_config,
+)
+from .faults import FaultContext, FaultDecision, evaluate_fault
+from .home_assistant import HomeAssistantClient, HomeAssistantEntityState, HomeAssistantError
+from .schemas import (
+    ActionRequest,
+    ActionResponse,
+    ActionStateResponse,
+    ActionSummary,
+    ExecutionTrackingResponse,
+    HealthResponse,
+)
 from .udp_events import UdpEventPhase, UdpEventSender
 
 CONFIRMATION_TOKEN_TTL_SECONDS = 120
 EXECUTION_REQUEST_TTL_SECONDS = 600
 GENERIC_CONFIG_ERROR = "Bridge configuration is unavailable."
 HOME_ASSISTANT_ERROR_CODE = "home_assistant_request_failed"
+DRY_RUN_CONFLICT_ERROR_CODE = "dry_run_request_conflict"
+EXECUTION_CONTRACT_ERROR_CODE = "invalid_execution_contract"
+SUBMISSION_OUTCOME_UNKNOWN_ERROR_CODE = "home_assistant_submission_outcome_unknown"
+MAX_EXECUTION_DEADLINE_SECONDS = 180.0
+THOUGHT_CORE_REQUEST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}\Z")
+
+OPERATOR_CONSOLE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Home Control Operator</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+    body {
+      margin: 0;
+      background: Canvas;
+      color: CanvasText;
+    }
+    main {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    h1 {
+      margin: 0 0 16px;
+      font-size: 1.5rem;
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+    input {
+      min-width: min(460px, 100%);
+      flex: 1 1 280px;
+      padding: 8px 10px;
+      border: 1px solid color-mix(in srgb, CanvasText 35%, Canvas);
+      border-radius: 6px;
+      font: inherit;
+    }
+    button {
+      min-height: 36px;
+      padding: 7px 11px;
+      border: 1px solid color-mix(in srgb, CanvasText 35%, Canvas);
+      border-radius: 6px;
+      background: ButtonFace;
+      color: ButtonText;
+      font: inherit;
+      cursor: pointer;
+    }
+    button.primary {
+      border-color: #1d4ed8;
+      background: #2563eb;
+      color: white;
+    }
+    button.danger {
+      border-color: #b91c1c;
+      background: #dc2626;
+      color: white;
+    }
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px;
+    }
+    .action {
+      border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas);
+      border-radius: 8px;
+      padding: 14px;
+      background: color-mix(in srgb, Canvas 94%, CanvasText);
+    }
+    .action h2 {
+      margin: 0 0 8px;
+      font-size: 1rem;
+    }
+    .meta {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 4px 10px;
+      margin: 10px 0 12px;
+      font-size: 0.9rem;
+    }
+    .meta dt {
+      color: color-mix(in srgb, CanvasText 65%, Canvas);
+    }
+    .meta dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+    }
+    .status {
+      margin: 0 0 14px;
+      min-height: 20px;
+      color: color-mix(in srgb, CanvasText 72%, Canvas);
+    }
+    pre {
+      margin-top: 18px;
+      padding: 12px;
+      max-height: 360px;
+      overflow: auto;
+      border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas);
+      border-radius: 8px;
+      background: color-mix(in srgb, Canvas 88%, CanvasText);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Home Control Operator</h1>
+  <div class="toolbar">
+    <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Bridge API token">
+    <button id="load" class="primary" type="button">Load command metadata</button>
+  </div>
+  <p id="status" class="status">Enter the local bridge token, then load the allowlisted command metadata.</p>
+  <section id="route-actions" class="grid" aria-label="Reviewed command shortcuts"></section>
+  <section id="actions" class="grid" aria-live="polite"></section>
+  <pre id="output" aria-live="polite"></pre>
+</main>
+<script>
+(() => {
+  const tokenInput = document.getElementById("token");
+  const loadButton = document.getElementById("load");
+  const statusNode = document.getElementById("status");
+  const routeActionsNode = document.getElementById("route-actions");
+  const actionsNode = document.getElementById("actions");
+  const outputNode = document.getElementById("output");
+  const reviewedRouteActions = [
+    {
+      action_id: "aircon_cool",
+      label: "Request AC cool",
+      route_shortcut_class: "reviewed_first_action_candidate",
+      command_stimulus_class: "ha_visible_mode_command_candidate",
+      restore_required: true,
+      restore_action_id: "aircon_hvac_off",
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "positive1_restore1",
+      timing_estimate_class: "measurement_required",
+    },
+    {
+      action_id: "aircon_hvac_off",
+      label: "Request AC off restore",
+      route_shortcut_class: "reviewed_restore_candidate",
+      command_stimulus_class: "ha_visible_mode_restore_candidate",
+      restore_required: false,
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "restore1",
+      timing_estimate_class: "measurement_required",
+    },
+    {
+      action_id: "light_toggle",
+      label: "Submit light toggle command",
+      route_shortcut_class: "reviewed_light_toggle_command_stimulus_candidate",
+      command_stimulus_class: "toggle_command_stimulus_without_directional_state",
+      restore_required: false,
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "toggle1_restore0",
+      timing_estimate_class: "external_observation_required",
+    },
+    {
+      action_id: "fan_on",
+      label: "Submit fan on command",
+      route_shortcut_class: "reviewed_fan_command_stimulus_candidate",
+      command_stimulus_class: "command_stimulus_without_restore_required",
+      restore_required: false,
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "positive1_restore0",
+      timing_estimate_class: "measurement_required",
+    },
+    {
+      action_id: "fan_off",
+      label: "Submit fan off command",
+      route_shortcut_class: "reviewed_fan_command_stimulus_candidate",
+      command_stimulus_class: "command_stimulus_without_restore_required",
+      restore_required: false,
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "positive1_restore0",
+      timing_estimate_class: "measurement_required",
+    },
+    {
+      action_id: "door_open",
+      label: "Request door open movement",
+      route_shortcut_class: "reviewed_door_open_candidate",
+      command_stimulus_class: "position_command_open_then_close",
+      restore_required: true,
+      restore_action_id: "door_close",
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "open1_close1",
+      timing_estimate_class: "measurement_required",
+    },
+    {
+      action_id: "door_close",
+      label: "Request door close movement",
+      route_shortcut_class: "reviewed_door_close_restore_candidate",
+      command_stimulus_class: "position_command_close_or_restore",
+      restore_required: false,
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "close1",
+      timing_estimate_class: "measurement_required",
+    },
+    {
+      action_id: "vacuum_return",
+      label: "Request vacuum return",
+      route_shortcut_class: "reviewed_vacuum_return_restore_candidate",
+      command_stimulus_class: "terminal_return_command_candidate",
+      restore_required: false,
+      proof_ceiling: "operator_shortcut_submission_summary_only",
+      later_runtime_count_bound: "return1",
+      timing_estimate_class: "measurement_required",
+    },
+  ];
+
+  const setStatus = (text) => {
+    statusNode.textContent = text;
+  };
+
+  const show = (label, value) => {
+    outputNode.textContent = `${label}\\n${JSON.stringify(value, null, 2)}`;
+  };
+
+  const requestId = (actionId, suffix) => (
+    `operator-${actionId}-${suffix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  );
+
+  const token = () => tokenInput.value.trim();
+
+  async function callBridge(path, options = {}) {
+    const currentToken = token();
+    if (!currentToken) {
+      throw new Error("Bridge API token is required.");
+    }
+    const response = await fetch(path, {
+      ...options,
+      headers: {
+        "Authorization": `Bearer ${currentToken}`,
+        "Content-Type": "application/json",
+        ...(options.headers || {}),
+      },
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(`HTTP ${response.status}`);
+      error.body = body;
+      throw error;
+    }
+    return body;
+  }
+
+  const bodyFor = (actionId, suffix, extra = {}) => ({
+    source: "home_control_operator_console",
+    request_id: requestId(actionId, suffix),
+    ...extra,
+  });
+
+  async function withResult(label, fn) {
+    try {
+      setStatus(`${label}...`);
+      const result = await fn();
+      show(label, result);
+      setStatus(`${label}: done`);
+      return result;
+    } catch (error) {
+      show(`${label}: failed`, error.body || { error: error.message });
+      setStatus(`${label}: failed`);
+      return null;
+    }
+  }
+
+  function appendMetaRow(list, label, value) {
+    if (value === null || value === undefined || value === "") {
+      return;
+    }
+    const rendered = Array.isArray(value) ? value.join(", ") : String(value);
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const description = document.createElement("dd");
+    description.textContent = rendered;
+    list.append(term, description);
+  }
+
+  function renderAction(action) {
+    const article = document.createElement("article");
+    article.className = "action";
+    const title = document.createElement("h2");
+    title.textContent = action.label;
+    const actionId = document.createElement("div");
+    actionId.textContent = action.action_id;
+    const meta = document.createElement("dl");
+    meta.className = "meta";
+    appendMetaRow(meta, "control class", action.control_type);
+    appendMetaRow(meta, "tracking metadata", action.state_tracking);
+    appendMetaRow(meta, "verification mode", action.verification_mode);
+    appendMetaRow(meta, "live-test readiness", action.live_test_readiness);
+    appendMetaRow(meta, "proof ceiling", action.proof_ceiling);
+    appendMetaRow(meta, "stimulus class", action.command_stimulus_class);
+    appendMetaRow(meta, "restore required", action.restore_required);
+    appendMetaRow(meta, "restore action", action.restore_action_id);
+    appendMetaRow(meta, "stop action", action.stop_action_id);
+    appendMetaRow(meta, "route class", action.route_shortcut_class);
+    appendMetaRow(meta, "count bound", action.later_runtime_count_bound);
+    appendMetaRow(meta, "timing estimate", action.timing_estimate_class);
+    appendMetaRow(meta, "wait window", `${action.settle_seconds || 0}s / ${action.timeout_seconds || 0}s`);
+    appendMetaRow(meta, "readiness blockers", action.live_test_blockers);
+    article.append(title, actionId, meta);
+    const row = document.createElement("div");
+    row.className = "row";
+
+    const stateButton = document.createElement("button");
+    stateButton.type = "button";
+    stateButton.textContent = "State check";
+    stateButton.onclick = () => withResult(`state check ${action.action_id}`, () => callBridge(`/actions/${action.action_id}/state`));
+    row.appendChild(stateButton);
+
+    const previewButton = document.createElement("button");
+    previewButton.type = "button";
+    previewButton.textContent = "Preview";
+    previewButton.onclick = () => withResult(`preview ${action.action_id}`, () => callBridge(
+      `/actions/${action.action_id}/preview`,
+      { method: "POST", body: JSON.stringify(bodyFor(action.action_id, "preview")) },
+    ));
+    row.appendChild(previewButton);
+
+    const dryRunButton = document.createElement("button");
+    dryRunButton.type = "button";
+    dryRunButton.textContent = "Dry run";
+    dryRunButton.onclick = () => withResult(`dry run ${action.action_id}`, () => callBridge(
+      `/actions/${action.action_id}/execute`,
+      { method: "POST", body: JSON.stringify(bodyFor(action.action_id, "dry-run", { dry_run: true })) },
+    ));
+    row.appendChild(dryRunButton);
+
+    const executeButton = document.createElement("button");
+    executeButton.type = "button";
+    executeButton.className = "danger";
+    executeButton.textContent = "Execute";
+    executeButton.onclick = async () => {
+      const result = await withResult(`execute ${action.action_id}`, () => callBridge(
+        `/actions/${action.action_id}/execute`,
+        { method: "POST", body: JSON.stringify(bodyFor(action.action_id, "execute")) },
+      ));
+      if (result && result.confirmation_required && result.confirmation_token) {
+        const confirmButton = document.createElement("button");
+        confirmButton.type = "button";
+        confirmButton.className = "danger";
+        confirmButton.textContent = "Confirm execute";
+        confirmButton.onclick = () => withResult(`confirm ${action.action_id}`, () => callBridge(
+          `/actions/${action.action_id}/execute`,
+          {
+            method: "POST",
+            body: JSON.stringify(bodyFor(action.action_id, "confirm", {
+              confirmed: true,
+              confirmation_token: result.confirmation_token,
+            })),
+          },
+        ));
+        row.appendChild(confirmButton);
+      }
+    };
+    row.appendChild(executeButton);
+
+    article.appendChild(row);
+    return article;
+  }
+
+  function renderRouteShortcuts() {
+    routeActionsNode.textContent = "";
+    for (const action of reviewedRouteActions) {
+      routeActionsNode.appendChild(renderAction(action));
+    }
+  }
+
+  async function loadActions() {
+    const actions = await withResult("load command metadata", () => callBridge("/actions"));
+    actionsNode.textContent = "";
+    if (!Array.isArray(actions)) {
+      return;
+    }
+    for (const action of actions) {
+      actionsNode.appendChild(renderAction(action));
+    }
+  }
+
+  renderRouteShortcuts();
+  loadButton.addEventListener("click", loadActions);
+})();
+</script>
+</body>
+</html>
+"""
 
 
 def create_app(
@@ -44,6 +482,8 @@ def create_app(
     app.state.config_error = config_error
     app.state.confirmation_tokens = {}
     app.state.execution_requests = {}
+    app.state.dry_run_requests = {}
+    app.state.fault_attempts = {}
     app.state.audit_logger = audit_logger if audit_logger is not None and config else (
         JsonlAuditLogger(config.server.log_path) if config else None
     )
@@ -98,6 +538,11 @@ def create_app(
                 status="config_error",
                 home_assistant={"ok": False, "error": GENERIC_CONFIG_ERROR},
                 actions_count=0,
+                config_profile="unknown",
+                demo_mappings_present=False,
+                light_demo_mappings_present=False,
+                fault_mode=False,
+                fault_rules_count=0,
             )
         if app.state.config_error:
             return HealthResponse(
@@ -105,6 +550,11 @@ def create_app(
                 status="config_error",
                 home_assistant={"ok": False, "error": GENERIC_CONFIG_ERROR},
                 actions_count=len(app.state.config.actions),
+                config_profile=_config_profile(app.state.config),
+                demo_mappings_present=_demo_mappings_present(app.state.config),
+                light_demo_mappings_present=_light_demo_mappings_present(app.state.config),
+                fault_mode=False,
+                fault_rules_count=0,
             )
         ha_status = await app.state.ha_client.check_connection()
         ok = bool(ha_status.get("ok"))
@@ -113,7 +563,16 @@ def create_app(
             status="ok" if ok else "degraded",
             home_assistant=ha_status,
             actions_count=len(app.state.config.actions),
+            config_profile=_config_profile(app.state.config),
+            demo_mappings_present=_demo_mappings_present(app.state.config),
+            light_demo_mappings_present=_light_demo_mappings_present(app.state.config),
+            fault_mode=False,
+            fault_rules_count=0,
         )
+
+    @app.get("/operator", response_class=HTMLResponse, include_in_schema=False)
+    async def operator_console() -> HTMLResponse:
+        return HTMLResponse(OPERATOR_CONSOLE_HTML)
 
     @app.get("/actions", response_model=list[ActionSummary], dependencies=[Depends(require_auth)])
     async def list_actions() -> list[ActionSummary]:
@@ -124,10 +583,81 @@ def create_app(
                 label=action.label,
                 confirm_required=action.confirm_required,
                 response_text=action.response_text,
+                control_type=action_control_type(action),
+                state_authority=action_state_authority(action),
+                verification_mode=action_verification_mode(action),
+                state_tracking=action_state_tracking_status(action),
+                verification=action.verification.model_dump(exclude_none=True) if action.verification is not None else None,
                 expected_effect=_expected_effect_payload(action),
+                position_proof=_position_proof_payload(action),
+                expected_states=action_expected_states(action),
+                settle_seconds=action_settle_seconds(action),
+                timeout_seconds=action_timeout_seconds(action),
+                proof_ceiling=action_proof_ceiling(action),
+                live_test_candidate=action.live_test_candidate,
+                live_test_readiness=action_live_test_readiness(action),
+                live_test_blockers=action_live_test_blockers(action),
+                restore_action_id=action.restore_action_id,
+                stop_action_id=action.stop_action_id,
+                terminal_action=action.terminal_action,
+                safety_requirements=list(action.safety_requirements),
             )
             for action_id, action in sorted(config.actions.items())
         ]
+
+    @app.get(
+        "/actions/{action_id}/state",
+        response_model=ActionStateResponse,
+        dependencies=[Depends(require_auth)],
+    )
+    async def get_action_state(action_id: str) -> ActionStateResponse:
+        config = require_config()
+        action = _get_action(config, action_id)
+        tracking_status = action_state_tracking_status(action)
+        tracking_fields = _state_tracking_summary_fields(action)
+        if tracking_status != "tracked":
+            return ActionStateResponse(
+                ok=False,
+                action_id=action_id,
+                status=tracking_status,
+                **tracking_fields,
+            )
+
+        expected_state = action.expected_effect.expected_state
+        expected_states = action_expected_states(action)
+        try:
+            entity_state = await app.state.ha_client.get_entity_state_snapshot(action.expected_effect.entity_id)
+        except HomeAssistantError:
+            return ActionStateResponse(
+                ok=False,
+                action_id=action_id,
+                status="unavailable",
+                expected_state=expected_state,
+                expected_states=expected_states,
+                **tracking_fields,
+                **_empty_position_state_fields(action),
+            )
+
+        actual_state = entity_state.state
+        position_fields = _position_state_fields(action, entity_state)
+        position_status = position_fields["position_status"]
+        state_matched = actual_state in expected_states
+        if position_status == "unavailable":
+            status = "position_unavailable"
+        elif state_matched and position_status in (None, "matched"):
+            status = "matched"
+        else:
+            status = "mismatch"
+        return ActionStateResponse(
+            ok=status == "matched",
+            action_id=action_id,
+            status=status,
+            expected_state=expected_state,
+            expected_states=expected_states,
+            actual_state=actual_state,
+            **tracking_fields,
+            **position_fields,
+        )
 
     @app.post(
         "/actions/{action_id}/preview",
@@ -175,8 +705,30 @@ def create_app(
     async def execute_action(action_id: str, body: ActionRequest | None = None) -> ActionResponse:
         body = body or ActionRequest()
         config = require_config()
+        unsupported_fault = _evaluate_fault(app, config, action_id, body, scenarios={"unsupported_action"})
+        if unsupported_fault is not None:
+            return _fault_response(app, action_id, None, body, None, unsupported_fault)
         action = _get_action(config, action_id)
         preview = action_preview_payload(action_id, action)
+
+        dry_run_record = _get_dry_run_request(app, body.request_id)
+        if body.dry_run and dry_run_record is not None:
+            if dry_run_record["fingerprint"] == _dry_run_fingerprint(action_id, body):
+                return _dry_run_duplicate_response(app, action_id, action, body, preview)
+            return _dry_run_conflict_response(app, action_id, action, body, preview)
+        if not body.dry_run and dry_run_record is not None:
+            return _dry_run_conflict_response(app, action_id, action, body, preview)
+
+        duplicate_execution = _get_execution_request(app, action_id, body.request_id)
+        if not body.dry_run and duplicate_execution is not None:
+            return _duplicate_execution_response(
+                app,
+                action_id,
+                action,
+                body,
+                preview,
+                duplicate_execution,
+            )
 
         if action.confirm_required and not (
             body.confirmed and _consume_confirmation_token(app, action_id, body.confirmation_token)
@@ -214,6 +766,7 @@ def create_app(
 
         if body.dry_run:
             message = f"dry-run: {action.label}を実行予定です。"
+            _register_dry_run_request(app, action_id, body)
             _audit(
                 app,
                 {
@@ -239,39 +792,48 @@ def create_app(
                 **_response_tracking_fields(action),
             )
 
-        duplicate_execution = _get_execution_request(app, action_id, body.request_id)
-        if duplicate_execution is not None:
-            message = "同じ request_id の操作はすでに受け付け済みです。"
-            _audit(
+        contract_error = _execution_contract_error(body)
+        if contract_error is not None:
+            return _execution_contract_error_response(
                 app,
-                {
-                    "event": "execute_duplicate_request",
-                    "action_id": action_id,
-                    "execution_id": duplicate_execution["execution_id"],
-                    "issued_at": duplicate_execution["issued_at"],
-                    "status": "duplicate",
-                    **_request_audit_fields(body),
-                    "executed": False,
-                    "confirm_required": action.confirm_required,
-                    "confirmed": body.confirmed,
-                    "ha_script": action.ha_script,
-                    **_expected_effect_audit_fields(action),
-                },
+                action_id,
+                action,
+                body,
+                preview,
+                contract_error,
             )
-            return ActionResponse(
-                ok=True,
-                action_id=action_id,
-                executed=False,
-                status="duplicate",
-                confirmation_required=action.confirm_required,
-                message=message,
-                speak=message,
-                request_id=body.request_id,
-                execution_id=duplicate_execution["execution_id"],
-                issued_at=duplicate_execution["issued_at"],
-                preview=preview,
-                **_response_tracking_fields(action),
+
+        effective_deadline = _effective_execution_deadline(
+            body,
+            default_seconds=config.home_assistant.timeout_seconds,
+        )
+        deadline_remaining = effective_deadline - monotonic()
+        if deadline_remaining is not None and deadline_remaining <= 0:
+            execution_id = str(uuid4())
+            issued_at = _utc_now_iso()
+            _register_execution_request(
+                app,
+                action_id,
+                body.request_id,
+                execution_id,
+                issued_at,
+                lifecycle="expired_before_submit",
+                submission_count=0,
+                terminal=True,
             )
+            return _expired_before_submit_response(
+                app,
+                action_id,
+                action,
+                body,
+                preview,
+                execution_id,
+                issued_at,
+            )
+
+        fault = _evaluate_fault(app, config, action_id, body)
+        if fault is not None:
+            return _fault_response(app, action_id, action, body, preview, fault)
 
         execution_id = str(uuid4())
         issued_at = _utc_now_iso()
@@ -279,17 +841,61 @@ def create_app(
         _emit_action_event(app, "start", action_id, action, body, execution_id=execution_id)
 
         try:
-            ha_result = await app.state.ha_client.turn_on_script(action.ha_script)
+            deadline_remaining = effective_deadline - monotonic()
+            if deadline_remaining is not None and deadline_remaining <= 0:
+                _complete_execution_request(
+                    app,
+                    action_id,
+                    body.request_id,
+                    lifecycle="expired_before_submit",
+                    submission_count=0,
+                )
+                return _expired_before_submit_response(
+                    app,
+                    action_id,
+                    action,
+                    body,
+                    preview,
+                    execution_id,
+                    issued_at,
+                )
+            ha_result = await app.state.ha_client.turn_on_script(
+                action.ha_script,
+                timeout_seconds=deadline_remaining,
+            )
+        except asyncio.CancelledError:
+            _complete_execution_request(
+                app,
+                action_id,
+                body.request_id,
+                lifecycle="submission_outcome_unknown",
+                submission_count=None,
+            )
+            raise
         except HomeAssistantError as exc:
             error_detail = getattr(exc, "log_detail", str(exc))
+            lifecycle = getattr(exc, "submission_outcome", "failed_before_submit")
+            if lifecycle not in {"failed_before_submit", "submission_outcome_unknown"}:
+                lifecycle = "submission_outcome_unknown"
+            submission_count = 0 if lifecycle == "failed_before_submit" else None
+            _complete_execution_request(
+                app,
+                action_id,
+                body.request_id,
+                lifecycle=lifecycle,
+                submission_count=submission_count,
+            )
+            outcome_unknown = lifecycle == "submission_outcome_unknown"
             _audit(
                 app,
                 {
-                    "event": "execute_failed",
+                    "event": (
+                        "execute_outcome_unknown" if outcome_unknown else "execute_failed_before_submit"
+                    ),
                     "action_id": action_id,
                     "execution_id": execution_id,
                     "issued_at": issued_at,
-                    "status": "failed",
+                    "status": lifecycle,
                     **_request_audit_fields(body),
                     "executed": False,
                     "confirm_required": action.confirm_required,
@@ -306,25 +912,104 @@ def create_app(
                 action,
                 body,
                 execution_id=execution_id,
-                message="Home Assistantへの実行要求に失敗しました。",
-                error=HOME_ASSISTANT_ERROR_CODE,
+                message=(
+                    "Home Assistantへの要求結果を確認できませんでした。"
+                    if outcome_unknown
+                    else "Home Assistantへの実行要求に失敗しました。"
+                ),
+                error=(
+                    SUBMISSION_OUTCOME_UNKNOWN_ERROR_CODE
+                    if outcome_unknown
+                    else HOME_ASSISTANT_ERROR_CODE
+                ),
             )
             return ActionResponse(
                 ok=False,
                 action_id=action_id,
                 executed=False,
-                status="failed",
+                status="outcome_unknown" if outcome_unknown else "failed",
                 confirmation_required=action.confirm_required,
-                message="Home Assistantへの実行要求に失敗しました。",
-                speak="家電操作に失敗しました。",
+                message=(
+                    "操作要求の結果を確認できません。再実行は保留します。"
+                    if outcome_unknown
+                    else "Home Assistantへの実行要求に失敗しました。"
+                ),
+                speak=(
+                    "操作結果を確認できないため、再実行を保留します。"
+                    if outcome_unknown
+                    else "家電操作に失敗しました。"
+                ),
                 request_id=body.request_id,
                 execution_id=execution_id,
                 issued_at=issued_at,
                 preview=preview,
                 **_response_tracking_fields(action),
-                error=HOME_ASSISTANT_ERROR_CODE,
+                error=(
+                    SUBMISSION_OUTCOME_UNKNOWN_ERROR_CODE
+                    if outcome_unknown
+                    else HOME_ASSISTANT_ERROR_CODE
+                ),
+                execution_lifecycle_class=lifecycle,
+                submission_count=submission_count,
+                terminal=True,
+            )
+        except Exception:
+            _complete_execution_request(
+                app,
+                action_id,
+                body.request_id,
+                lifecycle="submission_outcome_unknown",
+                submission_count=None,
+            )
+            _audit(
+                app,
+                {
+                    "event": "execute_outcome_unknown",
+                    "action_id": action_id,
+                    "execution_id": execution_id,
+                    "issued_at": issued_at,
+                    "status": "submission_outcome_unknown",
+                    "executed": False,
+                    "submission_count": None,
+                    "error": "unexpected_home_assistant_client_error",
+                },
+            )
+            _emit_action_event(
+                app,
+                "error",
+                action_id,
+                action,
+                body,
+                execution_id=execution_id,
+                message="Home Assistantへの要求結果を確認できませんでした。",
+                error=SUBMISSION_OUTCOME_UNKNOWN_ERROR_CODE,
+            )
+            return ActionResponse(
+                ok=False,
+                action_id=action_id,
+                executed=False,
+                status="outcome_unknown",
+                confirmation_required=action.confirm_required,
+                message="操作要求の結果を確認できません。再実行は保留します。",
+                speak="操作結果を確認できないため、再実行を保留します。",
+                request_id=body.request_id,
+                execution_id=execution_id,
+                issued_at=issued_at,
+                preview=preview,
+                **_response_tracking_fields(action),
+                error=SUBMISSION_OUTCOME_UNKNOWN_ERROR_CODE,
+                execution_lifecycle_class="submission_outcome_unknown",
+                submission_count=None,
+                terminal=True,
             )
 
+        _complete_execution_request(
+            app,
+            action_id,
+            body.request_id,
+            lifecycle="submission_completed",
+            submission_count=1,
+        )
         _audit(
             app,
             {
@@ -356,6 +1041,48 @@ def create_app(
             issued_at=issued_at,
             preview=preview,
             **_response_tracking_fields(action),
+            execution_lifecycle_class="submission_completed",
+            submission_count=1,
+            terminal=True,
+        )
+
+    @app.get(
+        "/executions/{execution_id}",
+        response_model=ExecutionTrackingResponse,
+        dependencies=[Depends(require_auth)],
+    )
+    async def track_execution(
+        execution_id: str,
+        action_id: str,
+        request_id: str,
+    ) -> ExecutionTrackingResponse:
+        record = _find_execution_request(app, execution_id)
+        if record is None:
+            return ExecutionTrackingResponse(
+                ok=False,
+                found=False,
+                action_match=False,
+                request_match=False,
+            )
+        action_match = record["action_id"] == action_id
+        request_match = record["request_id"] == request_id
+        if not action_match or not request_match:
+            return ExecutionTrackingResponse(
+                ok=False,
+                found=True,
+                action_match=action_match,
+                request_match=request_match,
+            )
+        elapsed_ms = max(0, int((monotonic() - record["started_monotonic"]) * 1000))
+        return ExecutionTrackingResponse(
+            ok=True,
+            found=True,
+            action_match=True,
+            request_match=True,
+            execution_lifecycle_class=record["lifecycle"],
+            submission_count=record["submission_count"],
+            terminal=record["terminal"],
+            elapsed_ms=elapsed_ms,
         )
 
     return app
@@ -397,21 +1124,190 @@ def _prune_confirmation_tokens(app: FastAPI) -> None:
             app.state.confirmation_tokens.pop(token, None)
 
 
+def _execution_contract_error(body: ActionRequest) -> str | None:
+    if body.request_id is not None and THOUGHT_CORE_REQUEST_ID_RE.fullmatch(body.request_id) is None:
+        return "request_id_invalid"
+    if (
+        body.deadline_monotonic_s is not None
+        and body.deadline_monotonic_s - monotonic() > MAX_EXECUTION_DEADLINE_SECONDS
+    ):
+        return "deadline_out_of_range"
+    return None
+
+
+def _effective_execution_deadline(
+    body: ActionRequest,
+    *,
+    default_seconds: float,
+) -> float:
+    bridge_deadline = monotonic() + min(
+        max(float(default_seconds), 0.001),
+        MAX_EXECUTION_DEADLINE_SECONDS,
+    )
+    if body.deadline_monotonic_s is None:
+        return bridge_deadline
+    return min(body.deadline_monotonic_s, bridge_deadline)
+
+
+def _execution_contract_error_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig,
+    body: ActionRequest,
+    preview: dict[str, object],
+    contract_error: str,
+) -> ActionResponse:
+    _audit(
+        app,
+        {
+            "event": "execute_contract_rejected",
+            "action_id": action_id,
+            "status": "failed_before_submit",
+            "contract_error": contract_error,
+            "executed": False,
+            "submission_count": 0,
+        },
+    )
+    message = "実行要求の期限または識別情報が不正なため、家電には送信していません。"
+    return ActionResponse(
+        ok=False,
+        action_id=action_id,
+        executed=False,
+        status="failed",
+        confirmation_required=action.confirm_required,
+        message=message,
+        speak=message,
+        preview=preview,
+        **_response_tracking_fields(action),
+        error=EXECUTION_CONTRACT_ERROR_CODE,
+        execution_lifecycle_class="failed_before_submit",
+        submission_count=0,
+        terminal=True,
+    )
+
+
+def _expired_before_submit_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig,
+    body: ActionRequest,
+    preview: dict[str, object],
+    execution_id: str,
+    issued_at: str,
+) -> ActionResponse:
+    _audit(
+        app,
+        {
+            "event": "execute_expired_before_submit",
+            "action_id": action_id,
+            "execution_id": execution_id,
+            "issued_at": issued_at,
+            "status": "expired_before_submit",
+            "executed": False,
+            "submission_count": 0,
+        },
+    )
+    message = "実行期限を過ぎたため、家電には送信していません。"
+    return ActionResponse(
+        ok=False,
+        action_id=action_id,
+        executed=False,
+        status="expired",
+        confirmation_required=action.confirm_required,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        execution_id=execution_id,
+        issued_at=issued_at,
+        preview=preview,
+        **_response_tracking_fields(action),
+        error="expired_before_submit",
+        execution_lifecycle_class="expired_before_submit",
+        submission_count=0,
+        terminal=True,
+    )
+
+
+def _duplicate_execution_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig,
+    body: ActionRequest,
+    preview: dict[str, object],
+    record: dict[str, object],
+) -> ActionResponse:
+    lifecycle = str(record["lifecycle"])
+    submission_count = record["submission_count"]
+    terminal = bool(record["terminal"])
+    safe_messages = {
+        "submission_in_flight": "同じ操作要求は処理中です。二重送信はしていません。",
+        "submission_completed": "同じ操作要求は送信済みです。二重送信はしていません。",
+        "failed_before_submit": "同じ操作要求は送信前に終了しています。二重送信はしていません。",
+        "submission_outcome_unknown": "同じ操作要求の結果を確認できないため、再送信を保留します。",
+        "expired_before_submit": "同じ操作要求は期限切れで、家電には送信していません。",
+    }
+    message = safe_messages.get(lifecycle, "同じ操作要求はすでに受け付け済みです。")
+    _audit(
+        app,
+        {
+            "event": "execute_duplicate_request",
+            "action_id": action_id,
+            "execution_id": record["execution_id"],
+            "issued_at": record["issued_at"],
+            "status": "duplicate",
+            "execution_lifecycle_class": lifecycle,
+            "submission_count": submission_count,
+            "executed": False,
+        },
+    )
+    return ActionResponse(
+        ok=lifecycle in {"submission_in_flight", "submission_completed"},
+        action_id=action_id,
+        executed=False,
+        status="duplicate",
+        confirmation_required=action.confirm_required,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        execution_id=str(record["execution_id"]),
+        issued_at=str(record["issued_at"]),
+        preview=preview,
+        **_response_tracking_fields(action),
+        error=(
+            SUBMISSION_OUTCOME_UNKNOWN_ERROR_CODE
+            if lifecycle == "submission_outcome_unknown"
+            else None
+        ),
+        execution_lifecycle_class=lifecycle,
+        submission_count=submission_count,
+        terminal=terminal,
+    )
+
+
 def _execution_key(action_id: str, request_id: str) -> str:
     return f"{action_id}\0{request_id}"
 
 
-def _get_execution_request(app: FastAPI, action_id: str, request_id: str | None) -> dict[str, str] | None:
+def _get_execution_request(
+    app: FastAPI,
+    action_id: str,
+    request_id: str | None,
+) -> dict[str, object] | None:
     _prune_execution_requests(app)
     if not request_id:
         return None
     record = app.state.execution_requests.get(_execution_key(action_id, request_id))
     if record is None:
         return None
-    return {
-        "execution_id": record["execution_id"],
-        "issued_at": record["issued_at"],
-    }
+    return record
+
+
+def _find_execution_request(app: FastAPI, execution_id: str) -> dict[str, object] | None:
+    _prune_execution_requests(app)
+    for record in app.state.execution_requests.values():
+        if record["execution_id"] == execution_id:
+            return record
+    return None
 
 
 def _register_execution_request(
@@ -420,23 +1316,102 @@ def _register_execution_request(
     request_id: str | None,
     execution_id: str,
     issued_at: str,
+    *,
+    lifecycle: str = "submission_in_flight",
+    submission_count: int | None = None,
+    terminal: bool = False,
 ) -> None:
     _prune_execution_requests(app)
     if not request_id:
         return
     app.state.execution_requests[_execution_key(action_id, request_id)] = {
-        "expires_at": monotonic() + EXECUTION_REQUEST_TTL_SECONDS,
+        "action_id": action_id,
+        "request_id": request_id,
         "execution_id": execution_id,
         "issued_at": issued_at,
+        "started_monotonic": monotonic(),
+        "lifecycle": lifecycle,
+        "submission_count": submission_count,
+        "terminal": terminal,
+        "expires_at": (
+            monotonic() + EXECUTION_REQUEST_TTL_SECONDS if terminal else None
+        ),
     }
+
+
+def _complete_execution_request(
+    app: FastAPI,
+    action_id: str,
+    request_id: str | None,
+    *,
+    lifecycle: str,
+    submission_count: int | None,
+) -> None:
+    if not request_id:
+        return
+    record = app.state.execution_requests.get(_execution_key(action_id, request_id))
+    if record is None:
+        return
+    record.update(
+        {
+            "lifecycle": lifecycle,
+            "submission_count": submission_count,
+            "terminal": True,
+            "expires_at": monotonic() + EXECUTION_REQUEST_TTL_SECONDS,
+        }
+    )
 
 
 def _prune_execution_requests(app: FastAPI) -> None:
     now = monotonic()
     for key, record in list(app.state.execution_requests.items()):
+        expires_at = record.get("expires_at")
+        if record.get("terminal") is True and isinstance(expires_at, (int, float)) and expires_at < now:
+            app.state.execution_requests.pop(key, None)
+
+
+def _get_dry_run_request(app: FastAPI, request_id: str | None) -> dict[str, object] | None:
+    _prune_dry_run_requests(app)
+    if not request_id:
+        return None
+    record = app.state.dry_run_requests.get(request_id)
+    if record is None:
+        return None
+    return {"fingerprint": record["fingerprint"]}
+
+
+def _register_dry_run_request(app: FastAPI, action_id: str, body: ActionRequest) -> None:
+    _prune_dry_run_requests(app)
+    if not body.request_id:
+        return
+    app.state.dry_run_requests[body.request_id] = {
+        "expires_at": monotonic() + EXECUTION_REQUEST_TTL_SECONDS,
+        "fingerprint": _dry_run_fingerprint(action_id, body),
+    }
+
+
+def _prune_dry_run_requests(app: FastAPI) -> None:
+    now = monotonic()
+    for key, record in list(app.state.dry_run_requests.items()):
         expires_at = record["expires_at"]
         if expires_at < now:
-            app.state.execution_requests.pop(key, None)
+            app.state.dry_run_requests.pop(key, None)
+
+
+def _dry_run_fingerprint(action_id: str, body: ActionRequest) -> dict[str, object]:
+    user_text_hash = None
+    if body.user_text is not None:
+        user_text_hash = sha256(body.user_text.encode("utf-8")).hexdigest()
+    return {
+        "action_id": action_id,
+        "source": body.source,
+        "dry_run": body.dry_run,
+        "confirmed": body.confirmed,
+        "confirmation_token_present": body.confirmation_token is not None,
+        "user_text_present": body.user_text is not None,
+        "user_text_length": len(body.user_text) if body.user_text is not None else None,
+        "user_text_sha256": user_text_hash,
+    }
 
 
 def _get_action(config: BridgeConfig, action_id: str):
@@ -444,6 +1419,40 @@ def _get_action(config: BridgeConfig, action_id: str):
     if action is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Action is not allowlisted.")
     return action
+
+
+def _demo_mappings_present(config: BridgeConfig) -> bool:
+    return any(action.ha_script.startswith("script.demo_") for action in config.actions.values())
+
+
+def _light_demo_mappings_present(config: BridgeConfig) -> bool:
+    return any(
+        action_id == "light_toggle" and action.ha_script.startswith("script.demo_")
+        for action_id, action in config.actions.items()
+    )
+
+
+def _config_profile(config: BridgeConfig) -> str:
+    configured = os.environ.get("HOME_CONTROL_CONFIG", "").strip()
+    if configured:
+        normalized = configured.replace("\\", "/").lower()
+        name = Path(normalized).name
+        if normalized.endswith("local/env/home-control.live.yaml"):
+            return "local"
+        if "example" in name or "demo" in name:
+            return "demo"
+        if "local" in name or "private" in name or "/local/" in normalized:
+            return "private"
+        if "generated" in name or ".cache/" in normalized:
+            return "generated"
+        if name == "home-control.yaml" and _light_demo_mappings_present(config):
+            return "demo"
+        return "custom"
+    if _light_demo_mappings_present(config):
+        return "demo"
+    if _demo_mappings_present(config):
+        return "custom"
+    return "unknown"
 
 
 def _request_audit_fields(body: ActionRequest) -> dict[str, object]:
@@ -457,19 +1466,412 @@ def _request_audit_fields(body: ActionRequest) -> dict[str, object]:
     return fields
 
 
+def _evaluate_fault(
+    app: FastAPI,
+    config: BridgeConfig,
+    action_id: str,
+    body: ActionRequest,
+    *,
+    scenarios: set | None = None,
+) -> FaultDecision | None:
+    return evaluate_fault(
+        config,
+        app.state.fault_attempts,
+        FaultContext(
+            action_id=action_id,
+            source=body.source,
+            request_id=body.request_id,
+            user_text=body.user_text,
+            confirmed=body.confirmed,
+        ),
+        scenarios=scenarios,
+    )
+
+
+def _fault_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig | None,
+    body: ActionRequest,
+    preview: dict[str, object] | None,
+    fault: FaultDecision,
+) -> ActionResponse:
+    if fault.outcome == "confirmation_required":
+        return _fault_confirmation_response(app, action_id, action, body, preview, fault)
+    if fault.outcome == "success":
+        return _fault_success_response(app, action_id, action, body, preview, fault)
+    if fault.outcome == "failed":
+        return _fault_failed_response(app, action_id, action, body, preview, fault)
+    if fault.outcome == "duplicate":
+        return _fault_duplicate_response(app, action_id, action, body, preview, fault)
+    if fault.outcome == "unsupported_action":
+        return _fault_unsupported_response(app, action_id, action, body, preview, fault)
+    raise AssertionError(f"Unhandled fault outcome: {fault.outcome}")
+
+
+def _dry_run_duplicate_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig,
+    body: ActionRequest,
+    preview: dict[str, object],
+) -> ActionResponse:
+    message = "同じ request_id の dry-run はすでに受け付け済みです。"
+    _audit(
+        app,
+        {
+            "event": "execute_dry_run_duplicate",
+            "action_id": action_id,
+            "status": "duplicate",
+            **_request_audit_fields(body),
+            "executed": False,
+            "confirm_required": action.confirm_required,
+            "confirmed": body.confirmed,
+            "ha_script": action.ha_script,
+        },
+    )
+    return ActionResponse(
+        ok=True,
+        action_id=action_id,
+        executed=False,
+        status="duplicate",
+        confirmation_required=action.confirm_required,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        preview=preview,
+        **_response_tracking_fields(action),
+    )
+
+
+def _dry_run_conflict_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig,
+    body: ActionRequest,
+    preview: dict[str, object],
+) -> ActionResponse:
+    message = "同じ request_id の dry-run と異なる操作要求は受け付けられません。"
+    _audit(
+        app,
+        {
+            "event": "execute_dry_run_conflict",
+            "action_id": action_id,
+            "status": "failed",
+            "error": DRY_RUN_CONFLICT_ERROR_CODE,
+            **_request_audit_fields(body),
+            "executed": False,
+            "confirm_required": action.confirm_required,
+            "confirmed": body.confirmed,
+            "ha_script": action.ha_script,
+        },
+    )
+    return ActionResponse(
+        ok=False,
+        action_id=action_id,
+        executed=False,
+        status="failed",
+        confirmation_required=action.confirm_required,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        preview=preview,
+        **_response_tracking_fields(action),
+        error=DRY_RUN_CONFLICT_ERROR_CODE,
+    )
+
+
+def _fault_confirmation_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig | None,
+    body: ActionRequest,
+    preview: dict[str, object] | None,
+    fault: FaultDecision,
+) -> ActionResponse:
+    if body.confirmed and _consume_confirmation_token(app, action_id, body.confirmation_token):
+        return _fault_success_response(app, action_id, action, body, preview, fault)
+
+    confirmation_token = _create_confirmation_token(app, action_id)
+    label = action.label if action is not None else action_id
+    message = fault.message or (
+        f"{label}には確認が必要です。実行する場合は confirmed=true と "
+        "confirmation_token を指定してください。"
+    )
+    _audit_fault(
+        app,
+        action_id,
+        action,
+        body,
+        fault,
+        status_value="confirmation_required",
+        executed=False,
+        execution_id=None,
+        issued_at=None,
+    )
+    return ActionResponse(
+        ok=True,
+        action_id=action_id,
+        executed=False,
+        status="confirmation_required",
+        confirmation_required=True,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        confirmation_token=confirmation_token,
+        preview=preview,
+        **_optional_response_tracking_fields(action),
+    )
+
+
+def _fault_success_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig | None,
+    body: ActionRequest,
+    preview: dict[str, object] | None,
+    fault: FaultDecision,
+) -> ActionResponse:
+    execution_id = str(uuid4())
+    issued_at = _utc_now_iso()
+    _register_execution_request(
+        app,
+        action_id,
+        body.request_id,
+        execution_id,
+        issued_at,
+        lifecycle="submission_completed",
+        submission_count=1,
+        terminal=True,
+    )
+    message = fault.message or (action.response_text if action is not None else "Simulated action submitted.")
+    _audit_fault(
+        app,
+        action_id,
+        action,
+        body,
+        fault,
+        status_value="submitted",
+        executed=True,
+        execution_id=execution_id,
+        issued_at=issued_at,
+    )
+    return ActionResponse(
+        ok=True,
+        action_id=action_id,
+        executed=True,
+        status="submitted",
+        confirmation_required=False,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        execution_id=execution_id,
+        issued_at=issued_at,
+        preview=preview,
+        **_optional_response_tracking_fields(action),
+        execution_lifecycle_class="submission_completed",
+        submission_count=1,
+        terminal=True,
+    )
+
+
+def _fault_failed_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig | None,
+    body: ActionRequest,
+    preview: dict[str, object] | None,
+    fault: FaultDecision,
+) -> ActionResponse:
+    execution_id = str(uuid4())
+    issued_at = _utc_now_iso()
+    _register_execution_request(
+        app,
+        action_id,
+        body.request_id,
+        execution_id,
+        issued_at,
+        lifecycle="failed_before_submit",
+        submission_count=0,
+        terminal=True,
+    )
+    message = fault.message or "Home Assistantへの実行要求に失敗しました。"
+    _audit_fault(
+        app,
+        action_id,
+        action,
+        body,
+        fault,
+        status_value="failed",
+        executed=False,
+        execution_id=execution_id,
+        issued_at=issued_at,
+    )
+    return ActionResponse(
+        ok=False,
+        action_id=action_id,
+        executed=False,
+        status="failed",
+        confirmation_required=False,
+        message=message,
+        speak="家電操作に失敗しました。",
+        request_id=body.request_id,
+        execution_id=execution_id,
+        issued_at=issued_at,
+        preview=preview,
+        **_optional_response_tracking_fields(action),
+        error=HOME_ASSISTANT_ERROR_CODE,
+        execution_lifecycle_class="failed_before_submit",
+        submission_count=0,
+        terminal=True,
+    )
+
+
+def _fault_duplicate_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig | None,
+    body: ActionRequest,
+    preview: dict[str, object] | None,
+    fault: FaultDecision,
+) -> ActionResponse:
+    execution_id = str(uuid4())
+    issued_at = _utc_now_iso()
+    message = fault.message or "同じ request_id の操作はすでに受け付け済みです。"
+    _audit_fault(
+        app,
+        action_id,
+        action,
+        body,
+        fault,
+        status_value="duplicate",
+        executed=False,
+        execution_id=execution_id,
+        issued_at=issued_at,
+    )
+    return ActionResponse(
+        ok=True,
+        action_id=action_id,
+        executed=False,
+        status="duplicate",
+        confirmation_required=False,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        execution_id=execution_id,
+        issued_at=issued_at,
+        preview=preview,
+        **_optional_response_tracking_fields(action),
+    )
+
+
+def _fault_unsupported_response(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig | None,
+    body: ActionRequest,
+    preview: dict[str, object] | None,
+    fault: FaultDecision,
+) -> ActionResponse:
+    message = fault.message or "Action is not allowlisted."
+    _audit_fault(
+        app,
+        action_id,
+        action,
+        body,
+        fault,
+        status_value="failed",
+        executed=False,
+        execution_id=None,
+        issued_at=None,
+    )
+    return ActionResponse(
+        ok=False,
+        action_id=action_id,
+        executed=False,
+        status="failed",
+        confirmation_required=False,
+        message=message,
+        speak=message,
+        request_id=body.request_id,
+        preview=preview,
+        **_optional_response_tracking_fields(action),
+        error="unsupported_action",
+    )
+
+
+def _audit_fault(
+    app: FastAPI,
+    action_id: str,
+    action: ActionConfig | None,
+    body: ActionRequest,
+    fault: FaultDecision,
+    *,
+    status_value: str,
+    executed: bool,
+    execution_id: str | None,
+    issued_at: str | None,
+) -> None:
+    event: dict[str, object] = {
+        "event": "fault_injected",
+        "action_id": action_id,
+        "scenario": fault.scenario,
+        "attempt": fault.attempt,
+        "fault_rule_index": fault.rule_index,
+        "status": status_value,
+        **_request_audit_fields(body),
+        "executed": executed,
+        "confirmed": body.confirmed,
+    }
+    if execution_id is not None:
+        event["execution_id"] = execution_id
+    if issued_at is not None:
+        event["issued_at"] = issued_at
+    if action is not None:
+        event["ha_script"] = action.ha_script
+        event.update(_expected_effect_audit_fields(action))
+    if fault.message is not None:
+        event["fault_message"] = fault.message
+    _audit(app, event)
+
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
 def _expected_effect_payload(action: ActionConfig) -> dict[str, str] | None:
-    if action.expected_effect is None:
-        return None
-    return action.expected_effect.model_dump()
+    return action_public_expected_effect(action)
+
+
+def _position_proof_payload(action: ActionConfig) -> dict[str, object] | None:
+    return action_public_position_proof(action)
+
+
+def _state_tracking_summary_fields(action: ActionConfig) -> dict[str, str]:
+    return {
+        "control_type": action_control_type(action),
+        "state_authority": action_state_authority(action),
+        "verification_mode": action_verification_mode(action),
+        "state_tracking": action_state_tracking_status(action),
+    }
 
 
 def _response_tracking_fields(action: ActionConfig) -> dict[str, object]:
+    fields: dict[str, object] = _state_tracking_summary_fields(action)
+    fields["expected_states"] = action_expected_states(action)
+    fields["settle_seconds"] = action_settle_seconds(action)
+    fields["timeout_seconds"] = action_timeout_seconds(action)
+    fields["position_proof"] = _position_proof_payload(action)
+    fields["proof_ceiling"] = action_proof_ceiling(action)
+    fields["live_test_candidate"] = action.live_test_candidate
+    fields["live_test_readiness"] = action_live_test_readiness(action)
+    fields["live_test_blockers"] = action_live_test_blockers(action)
+    fields["restore_action_id"] = action.restore_action_id
+    fields["stop_action_id"] = action.stop_action_id
+    fields["terminal_action"] = action.terminal_action
+    fields["safety_requirements"] = list(action.safety_requirements)
     effect = _expected_effect_payload(action)
-    fields: dict[str, object] = {"expected_effect": effect}
+    fields["expected_effect"] = effect
     if effect is None:
         return fields
     fields.update(
@@ -483,11 +1885,82 @@ def _response_tracking_fields(action: ActionConfig) -> dict[str, object]:
     return fields
 
 
+def _optional_response_tracking_fields(action: ActionConfig | None) -> dict[str, object]:
+    if action is None:
+        return {}
+    return _response_tracking_fields(action)
+
+
 def _expected_effect_audit_fields(action: ActionConfig) -> dict[str, object]:
+    fields: dict[str, object] = _state_tracking_summary_fields(action)
+    fields["expected_states"] = action_expected_states(action)
+    fields["settle_seconds"] = action_settle_seconds(action)
+    fields["timeout_seconds"] = action_timeout_seconds(action)
+    fields["position_proof"] = _position_proof_payload(action)
     effect = _expected_effect_payload(action)
     if effect is None:
-        return {}
-    return {"expected_effect": effect}
+        return fields
+    fields["expected_effect"] = effect
+    return fields
+
+
+def _empty_position_state_fields(action: ActionConfig) -> dict[str, object]:
+    proof = _position_proof_payload(action)
+    if proof is None:
+        return {
+            "position_attribute": None,
+            "expected_position_min": None,
+            "expected_position_max": None,
+            "actual_position": None,
+            "position_status": None,
+        }
+    return {
+        "position_attribute": proof["attribute"],
+        "expected_position_min": proof.get("min"),
+        "expected_position_max": proof.get("max"),
+        "actual_position": None,
+        "position_status": "unavailable",
+    }
+
+
+def _position_state_fields(action: ActionConfig, entity_state: HomeAssistantEntityState) -> dict[str, object]:
+    proof = _position_proof_payload(action)
+    if proof is None:
+        return _empty_position_state_fields(action)
+
+    position = _coerce_position(entity_state.attributes.get(proof["attribute"]))
+    min_position = proof.get("min")
+    max_position = proof.get("max")
+    matched = position is not None
+    if matched and min_position is not None:
+        matched = position >= float(min_position)
+    if matched and max_position is not None:
+        matched = position <= float(max_position)
+
+    return {
+        "position_attribute": proof["attribute"],
+        "expected_position_min": min_position,
+        "expected_position_max": max_position,
+        "actual_position": position,
+        "position_status": ("matched" if matched else "mismatch") if position is not None else "unavailable",
+    }
+
+
+def _coerce_position(value: object) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        position = float(value)
+    elif isinstance(value, str):
+        try:
+            position = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    if not isfinite(position):
+        return None
+    return position
 
 
 def _audit(app: FastAPI, event: dict) -> None:

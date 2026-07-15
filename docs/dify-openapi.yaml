@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Home Control Safety Bridge
-  version: 0.1.0
+  version: 0.1.1
   description: >
     Local HTTP bridge for Dify/AITuberKit/sword-voice-agent. It only exposes
     configured action_id values and internally calls Home Assistant
@@ -56,6 +56,22 @@ paths:
           description: Missing or invalid token
         "404":
           description: Action is not allowlisted
+  /actions/{action_id}/state:
+    get:
+      summary: Read the redacted HA-visible state-check result for an allowlisted action
+      parameters:
+        - $ref: "#/components/parameters/ActionId"
+      responses:
+        "200":
+          description: Redacted state-check result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionStateResponse"
+        "401":
+          description: Missing or invalid token
+        "404":
+          description: Action is not allowlisted
   /actions/{action_id}/execute:
     post:
       summary: Execute an allowlisted action through Home Assistant script.turn_on
@@ -93,12 +109,14 @@ components:
       examples:
         light_on:
           value: light_on
-        curtain_close:
-          value: curtain_close
+        door_close:
+          value: door_close
+        vacuum_return:
+          value: vacuum_return
   schemas:
     HealthResponse:
       type: object
-      required: [ok, status, home_assistant, actions_count]
+      required: [ok, status, home_assistant, actions_count, fault_mode, fault_rules_count]
       properties:
         ok:
           type: boolean
@@ -110,9 +128,15 @@ components:
           additionalProperties: true
         actions_count:
           type: integer
+        fault_mode:
+          type: boolean
+          description: Always false on unauthenticated health responses; fault injection state is not disclosed.
+        fault_rules_count:
+          type: integer
+          description: Always 0 on unauthenticated health responses; configured rule count is not disclosed.
     ActionSummary:
       type: object
-      required: [action_id, label, confirm_required, response_text]
+      required: [action_id, label, confirm_required, response_text, control_type, state_authority, verification_mode, state_tracking]
       properties:
         action_id:
           type: string
@@ -122,9 +146,45 @@ components:
           type: boolean
         response_text:
           type: string
+        control_type:
+          type: string
+          enum: [stateful_target, stateless_toggle, stateless_command, position_command, mode_command, job_command, script_wrapper]
+          description: Appliance/control behavior class.
+        state_authority:
+          type: string
+          enum: [ha_entity, ha_inferred, external_sensor, manual, open_loop, submitted_only, unknown]
+          description: Metadata source for state checks; not current appliance state or physical proof.
+        verification_mode:
+          type: string
+          enum: [ha_state, external_observation, command_ack_only, manual_confirmation, unsupported]
+          description: Verification layer metadata for this action.
+        state_tracking:
+          type: string
+          enum: [tracked, external_required, ack_only, manual_required, unsupported]
+          description: Whether explicit metadata supports HA-visible state checking.
+        verification:
+          $ref: "#/components/schemas/Verification"
+          nullable: true
         expected_effect:
           $ref: "#/components/schemas/ExpectedEffect"
           nullable: true
+        position_proof:
+          $ref: "#/components/schemas/PositionProof"
+          nullable: true
+          description: Optional position threshold required in addition to accepted state for cover/door proof.
+        expected_states:
+          type: array
+          items:
+            type: string
+          description: States accepted by the read-only state check. Includes expected_effect.expected_state when tracked.
+        settle_seconds:
+          type: number
+          format: float
+          description: Suggested wait before post-action state read. Metadata only, not proof by itself.
+        timeout_seconds:
+          type: number
+          format: float
+          description: Suggested maximum wait window for route-owned state proof. Metadata only, not proof by itself.
     ActionRequest:
       type: object
       properties:
@@ -145,6 +205,65 @@ components:
           type: string
           nullable: true
           description: One-time token returned by preview/blocked execute for confirm_required actions.
+    ActionStateResponse:
+      type: object
+      required: [ok, action_id, status]
+      properties:
+        ok:
+          type: boolean
+          description: True only when actual_state matches expected_state or one of expected_states, and any configured position threshold also matches.
+        action_id:
+          type: string
+        status:
+          type: string
+          enum: [matched, mismatch, untracked, unavailable, position_unavailable, external_required, ack_only, manual_required, unsupported]
+        control_type:
+          type: string
+          nullable: true
+        state_authority:
+          type: string
+          nullable: true
+        verification_mode:
+          type: string
+          nullable: true
+        state_tracking:
+          type: string
+          nullable: true
+        expected_state:
+          type: string
+          nullable: true
+        expected_states:
+          type: array
+          items:
+            type: string
+          description: States accepted by the HA-visible state check.
+        actual_state:
+          type: string
+          nullable: true
+        position_attribute:
+          type: string
+          nullable: true
+          description: HA state attribute used for position proof, usually current_position.
+        expected_position_min:
+          type: number
+          format: float
+          nullable: true
+          description: Inclusive minimum accepted position.
+        expected_position_max:
+          type: number
+          format: float
+          nullable: true
+          description: Inclusive maximum accepted position.
+        actual_position:
+          type: number
+          format: float
+          nullable: true
+          description: Redacted numeric position read from the target entity attributes.
+        position_status:
+          type: string
+          enum: [matched, mismatch, unavailable]
+          nullable: true
+          description: Result of the configured position threshold check.
     ActionResponse:
       type: object
       required: [ok, action_id, executed, status, confirmation_required, message, speak]
@@ -189,14 +308,46 @@ components:
         entity_id:
           type: string
           nullable: true
-          description: Expected-effect entity configured for later observation correlation.
+          description: Expected-effect target identifier for later observation correlation; authenticated local API only.
         expected_state:
           type: string
           nullable: true
           description: Expected state configured for later observation correlation. This is not an observed label.
+        control_type:
+          type: string
+          nullable: true
+          description: Appliance/control behavior class.
+        state_authority:
+          type: string
+          nullable: true
+          description: Metadata source for state checks; not current appliance state or physical proof.
+        verification_mode:
+          type: string
+          nullable: true
+          description: Verification layer metadata for this action.
+        state_tracking:
+          type: string
+          nullable: true
+          description: Whether explicit metadata supports HA-visible state checking.
         expected_effect:
           $ref: "#/components/schemas/ExpectedEffect"
           nullable: true
+        position_proof:
+          $ref: "#/components/schemas/PositionProof"
+          nullable: true
+        expected_states:
+          type: array
+          items:
+            type: string
+          description: States accepted by the HA-visible state check.
+        settle_seconds:
+          type: number
+          format: float
+          description: Suggested wait before post-action state read. Metadata only, not proof by itself.
+        timeout_seconds:
+          type: number
+          format: float
+          description: Suggested maximum wait window for route-owned state proof. Metadata only, not proof by itself.
         confirmation_token:
           type: string
           nullable: true
@@ -209,6 +360,49 @@ components:
           type: string
           nullable: true
           description: Generic error code. Internal Home Assistant details are not returned.
+    Verification:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [ha_state, external_observation, command_ack_only, manual_confirmation, unsupported]
+        accepted_states:
+          type: array
+          items:
+            type: string
+          description: Additional HA-visible states accepted by the state check; expected_effect.expected_state is included separately.
+        settle_seconds:
+          type: number
+          format: float
+          description: Suggested wait before post-action state read.
+        timeout_seconds:
+          type: number
+          format: float
+          description: Suggested maximum wait window for route-owned state proof.
+        position:
+          $ref: "#/components/schemas/PositionProof"
+          nullable: true
+          description: Optional inclusive numeric position threshold required in addition to accepted state.
+    PositionProof:
+      type: object
+      required: [attribute]
+      properties:
+        attribute:
+          type: string
+          default: current_position
+        min:
+          type: number
+          format: float
+          nullable: true
+          minimum: 0
+          maximum: 100
+        max:
+          type: number
+          format: float
+          nullable: true
+          minimum: 0
+          maximum: 100
     ExpectedEffect:
       type: object
       required: [domain, service, entity_id, expected_state]
