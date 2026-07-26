@@ -39,35 +39,47 @@ faults:
     # Fault injection is ignored unless both faults.enabled is true and HOME_CONTROL_FAULT_MODE=1.
     - match:
         source: "dify"
-        action_id: "light_toggle"
+        action_id: "light_on"
       scenario: "fail_once_then_success"
       message: "simulated transient failure"
     - match:
         source: "dify"
-        action_id: "light_toggle"
+        action_id: "light_off"
         request_id_prefix: "e2e-confirm"
       scenario: "confirmation_required"
       message: "simulated confirmation required"
 
 actions:
   # Standard appliance review universe:
-  # light_toggle, fan_on, fan_off, aircon_on, aircon_off,
+  # light_on, light_off, fan_on, fan_off, aircon_on, aircon_off,
   # door_open, door_close, door_stop, vacuum_start, vacuum_return, vacuum_pause.
   #
   # Keep open-loop or command-only devices out of HA state proof. Promote an
   # action to verification.mode: ha_state only after the target entity can be
   # read back reliably and an exact execute/wait/CheckState pass proves it.
-  light_toggle:
-    label: "照明トグルを送信"
-    ha_script: "script.demo_light_toggle"
+  light_on:
+    label: "照明をつける操作を送信"
+    ha_script: "script.demo_light_on"
     confirm_required: false
-    response_text: "照明トグル操作を送信しました。点灯/消灯の実状態は外部観測で確認してください。"
-    control_type: "stateless_toggle"
-    state_authority: "open_loop"
+    response_text: "照明をつける操作を送信しました。実際の点灯状態は外部観測で確認してください。"
+    control_type: "stateless_command"
+    state_authority: "submitted_only"
     live_test_candidate: true
     restore_required: false
     verification:
-      mode: "external_observation"
+      mode: "command_ack_only"
+
+  light_off:
+    label: "照明を消す操作を送信"
+    ha_script: "script.demo_light_off"
+    confirm_required: false
+    response_text: "照明を消す操作を送信しました。実際の消灯状態は外部観測で確認してください。"
+    control_type: "stateless_command"
+    state_authority: "submitted_only"
+    live_test_candidate: true
+    restore_required: false
+    verification:
+      mode: "command_ack_only"
 
   fan_on:
     label: "扇風機をつける"
