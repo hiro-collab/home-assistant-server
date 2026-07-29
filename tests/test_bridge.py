@@ -348,6 +348,74 @@ def test_example_light_commands_submit_only_the_configured_directional_scripts(t
     ).status_code == 404
 
 
+def test_example_curtain_commands_follow_standing_authority_without_confirmation_and_preserve_tracking(
+    token,
+    tmp_path,
+):
+    config_path = Path(__file__).resolve().parents[1] / "config" / "home-control.example.yaml"
+    loaded = load_config(config_path)
+    client, ha, _, _ = make_client(loaded, token, tmp_path)
+
+    expected = {
+        "door_open": ("script.demo_door_open", "open", "door_close", False),
+        "door_close": ("script.demo_door_close", "closed", None, True),
+    }
+
+    for action_id, (ha_script, expected_state, restore_action_id, terminal_action) in expected.items():
+        request_id = f"req-standing-authority-{action_id}"
+        preview = client.post(
+            f"/actions/{action_id}/preview",
+            headers=auth_headers(token),
+            json={"source": "test", "request_id": f"{request_id}-preview"},
+        )
+        execute = client.post(
+            f"/actions/{action_id}/execute",
+            headers=auth_headers(token),
+            json={"source": "test", "request_id": request_id},
+        )
+        duplicate = client.post(
+            f"/actions/{action_id}/execute",
+            headers=auth_headers(token),
+            json={"source": "test", "request_id": request_id},
+        )
+
+        assert preview.status_code == 200
+        preview_body = preview.json()
+        assert preview_body["status"] == "preview"
+        assert preview_body["executed"] is False
+        assert preview_body["confirmation_required"] is False
+        assert preview_body["confirmation_token"] is None
+
+        assert execute.status_code == 200
+        body = execute.json()
+        assert body["status"] == "submitted"
+        assert body["executed"] is True
+        assert body["confirmation_required"] is False
+        assert body["execution_lifecycle_class"] == "submission_completed"
+        assert body["submission_count"] == 1
+        assert body["state_authority"] == "ha_entity"
+        assert body["verification_mode"] == "ha_state"
+        assert body["state_tracking"] == "tracked"
+        assert body["expected_state"] == expected_state
+        assert body["expected_states"] == [expected_state]
+        assert body["restore_action_id"] == restore_action_id
+        assert body["terminal_action"] is terminal_action
+        assert body["proof_ceiling"] == "ha_visible_cover_position_checkstate_layer"
+        assert_uuid(body["execution_id"])
+
+        assert duplicate.status_code == 200
+        duplicate_body = duplicate.json()
+        assert duplicate_body["status"] == "duplicate"
+        assert duplicate_body["executed"] is False
+        assert duplicate_body["confirmation_required"] is False
+        assert duplicate_body["execution_id"] == body["execution_id"]
+        assert duplicate_body["execution_lifecycle_class"] == "submission_completed"
+        assert duplicate_body["submission_count"] == 1
+        assert ha.calls.count(ha_script) == 1
+
+    assert ha.calls == ["script.demo_door_open", "script.demo_door_close"]
+
+
 def test_example_config_live_readiness_classes_are_source_reproducible():
     config_path = Path(__file__).resolve().parents[1] / "config" / "home-control.example.yaml"
 

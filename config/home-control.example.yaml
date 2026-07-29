@@ -128,7 +128,7 @@ actions:
   door_open:
     label: "中扉を開ける"
     ha_script: "script.demo_door_open"
-    confirm_required: true
+    confirm_required: false
     response_text: "中扉を開ける操作を送信しました。HA の位置状態を確認してください。"
     control_type: "position_command"
     state_authority: "ha_entity"
@@ -153,7 +153,7 @@ actions:
   door_close:
     label: "中扉を閉める"
     ha_script: "script.demo_door_close"
-    confirm_required: true
+    confirm_required: false
     response_text: "中扉を閉める操作を送信しました。HA の位置状態を確認してください。"
     control_type: "position_command"
     state_authority: "ha_entity"
